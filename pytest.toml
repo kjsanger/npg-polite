@@ -1,0 +1,8 @@
+[pytest]
+pythonpath = ["src", "tests" ]
+testpaths = [ "tests" ]
+python_functions = [ "test_*" ]
+log_cli = true
+log_cli_level = "INFO"
+
+addopts = ["--import-mode=prepend"]

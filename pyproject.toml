@@ -1,0 +1,50 @@
+[project]
+name = "npg-polite"
+description = "A Task-centric, Minimal Python API for NPG Porch"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [{ name = "Keith James", email = "kdj@sanger.ac.uk" }]
+
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries",
+    "Programming Language :: Python",
+    "Private :: Do Not Upload",
+]
+
+dynamic = ["version"]
+
+requires-python = ">=3.14"
+
+dependencies = [
+    "npg-python-lib >= 1.0.0,<2",
+    "requests",
+    "structlog"
+]
+
+[project.optional-dependencies]
+test = [
+    "black >=26",
+    "pytest",
+    "pytest-it >=0.1.5"
+]
+
+[project.urls]
+homepage = "https://github.com/wtsi-npg/npg-polite"
+repository = "https://github.com/wtsi-npg/npg-polite.git"
+
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools-git-versioning>=3.0,<4"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Note: we are relying on setuptools' automatic package discovery, so no further
+# configuration is required. This is possible because partisan uses a standard src
+# layout. See the following for more information:
+#
+# https://setuptools.pypa.io/en/latest/userguide/package_discovery.html#src-layout
+
+[tool.setuptools-git-versioning]
+enabled = true

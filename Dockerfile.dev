@@ -1,0 +1,47 @@
+FROM python:3.14-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -q -y --no-install-recommends \
+    apt-utils \
+    ca-certificates \
+    git \
+    locales \
+    unattended-upgrades && \
+    unattended-upgrade -v && \
+    locale-gen en_GB en_GB.UTF-8 && \
+    localedef -i en_GB -c -f UTF-8 -A /usr/share/locale/locale.alias en_GB.UTF-8 && \
+    apt-get remove -q -y unattended-upgrades && \
+    apt-get autoremove -q -y && \
+    apt-get clean -q -y && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_GB.UTF-8 \
+    LANGUAGE=en_GB \
+    LC_ALL=en_GB.UTF-8 \
+    TZ=/Etc/UTC
+
+ARG APP_USER=appuser
+ARG APP_UID=1000
+ARG APP_GID=$APP_UID
+
+RUN groupadd --gid $APP_GID $APP_USER && \
+    useradd --uid $APP_UID --gid $APP_GID --shell /bin/bash --create-home $APP_USER
+
+WORKDIR /app
+
+COPY . /app
+
+RUN python -m venv /app/venv && \
+    . /app/venv/bin/activate && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r test-requirements.txt
+
+RUN chown -R $APP_USER:$APP_USER /app
+
+USER $APP_USER
+
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
+
+CMD ["/bin/bash"]

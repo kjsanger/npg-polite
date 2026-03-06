@@ -1,0 +1,48 @@
+
+name: "Create release"
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l -e -o pipefail {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Fetch Tags"
+        run: git fetch --tags --force
+
+      - name: "Set up Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          architecture: "x64"
+
+      - name: "Install Dependencies"
+        run: |
+          pip install --upgrade pip
+          pip install build
+
+      - name: "Build Package"
+        run: python -m build
+
+      - name: "Get release variables"
+        run: |
+          echo RELEASE_VERSION=$(git describe --always --tags --dirty) >> $GITHUB_ENV
+          echo MASTER_SHA=$(git rev-parse origin/master) >> $GITHUB_ENV
+
+      - name: "Create Release"
+        uses: ncipollo/release-action@440c8c1cb0ed28b9f43e4d1d670870f059653174
+        with:
+          name: ${{ env.RELEASE_VERSION }}
+          prerelease: ${{ !(github.sha == env.MASTER_SHA) }}
+          artifacts: "dist/*.tar.gz"
+          removeArtifacts: true
+          artifactErrorsFailBuild: true
+          generateReleaseNotes: true
