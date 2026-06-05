@@ -1,5 +1,5 @@
 #
-# Copyright © 2024 Genome Research Ltd. All rights reserved.
+# Copyright © 2024, 2026 Genome Research Ltd. All rights reserved.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -20,13 +20,16 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Generic, Self, TypeVar
+from typing import Self
 from urllib.parse import urljoin
 
 import requests
 from structlog import get_logger
 
-log = get_logger(__package__)
+
+def logger():
+    return get_logger(__package__)
+
 
 """This module provides a task-centric API for interacting with a Porch server. It
 hides the details sending requests to and receiving responses from the Porch server.
@@ -79,7 +82,9 @@ class Task(ABC):
     """The current status of the task."""
     status: Status
 
-    def __init__(self, status: Status = None):
+    def __init__(self, status: Status):
+        if status is None:
+            raise ValueError("status cannot be None")
         self.status = status
 
     def __eq__(self, other):
@@ -113,7 +118,7 @@ class Pipeline[T: Task = Task]:
     When a new pipeline is created, it must be registered with the Porch server before
     tasks can be added to it. This is done using the `register` method. Once registered,
     a pipeline token must be obtained using the `new_token` method. This token is used
-    to add, claim and update tasks for this pipeline.
+    to add, claim, and update tasks for this pipeline.
 
     A pipeline's `register` and `new_token` methods require an admin token. The other
     methods require a pipeline token.
@@ -124,7 +129,7 @@ class Pipeline[T: Task = Task]:
 
     To use this module for a new pipeline, you need to create a subclass of
     `Pipeline.Task` and implement the `to_serializable` and `from_serializable`
-    methods. See the Porch  documentation for more information on how the task
+    methods. See the Porch documentation for more information on how the task
     attributes and values are serialized as JSON.
 
     For example:
@@ -178,7 +183,7 @@ class Pipeline[T: Task = Task]:
     information. It has a timeout of 10 seconds and will retry failed requests up to 3
     times with an exponential backoff starting at 15 seconds.
 
-    Note: We could consider using only the first or first and seconds parts of the
+    Note: We could consider using only the first or first and second parts of the
     (SemVer) version number. This would allow bug-fix releases to be made that could
     re-run existing tasks for that version.
     """
@@ -269,30 +274,61 @@ class Pipeline[T: Task = Task]:
 
         self.timeout = 10
 
-    def register(self) -> Self:
+    def register(self, update_config=False) -> Self:
         """Register the pipeline with a Porch server.
 
-        This needs to be done only once for each pipeline (i.e. unique name, URI and
+        This needs to be done only once for each pipeline (i.e. unique name, URI, and
         version combination) and requires an admin token. If the pipeline already
         exists, this method will log a warning and return the existing pipeline.
 
         An admin token is required to use this method.
 
+        Args:
+            update_config: Update the config with the pipeline token if a new pipeline
+                is created. Default is False.
+
         Returns:
             The pipeline object.
         """
-        headers = self._headers(self.config.admin_token)
         body = self._to_serializable()
 
-        response = self._request(
-            "POST", self._pipeline_endpoint(), headers=headers, body=body
+        create_headers = self._headers(self.config.admin_token)
+        create_response = self._request(
+            "POST", self._pipeline_endpoint(), headers=create_headers, body=body
         )
+        if create_response.status_code == 409:
+            logger().info("A version of this pipeline already exists", pipeline=self)
+        elif create_response.status_code != 201:
+            create_response.raise_for_status()
 
-        if response.status_code == 409:
-            log.warn(f"Pipeline already exists", pipeline=self)
+        # The version attribute of the pipeline instance can't be created with the admin
+        # token, unlike the other attributes. Instead, it requires a pipeline token,
+        # which may not exist yet. If we haven't been provided one in the config, we
+        # have to assume that there isn't one available yet and create a new one.
+        if self.config.pipeline_token is None:
+            pipeline_token = self.new_token(token_desc="pipeline creation event")
+            if update_config:
+                self.config.pipeline_token = pipeline_token
+                logger().info(
+                    "Updated the in-memory config with a new pipeline token",
+                    pipeline=self,
+                )
+        else:
+            pipeline_token = self.config.pipeline_token
+            logger().debug(f"Using the pipeline token from config", pipeline=self)
+
+        version_headers = self._headers(pipeline_token)
+        version_response = self._request(
+            "POST", self._version_endpoint(), headers=version_headers, body=body
+        )
+        if version_response.status_code == 409:
+            logger().warn(
+                f"The requested pipeline version already exists", pipeline=self
+            )
             return self
 
-        response.raise_for_status()
+        version_response.raise_for_status()
+        logger().info("New pipeline created", pipeline=self)
 
         return self
 
@@ -316,6 +352,7 @@ class Pipeline[T: Task = Task]:
 
         response = self._request("POST", url, headers=headers)
         response.raise_for_status()
+        logger().info("New pipeline token", pipeline=self.name, desc=token_desc)
 
         return response.json()["token"]
 
@@ -335,6 +372,7 @@ class Pipeline[T: Task = Task]:
 
         response = self._request("POST", url, headers=headers, body=body)
         response.raise_for_status()
+        logger().info("Task add", pipeline=self.name, task=task)
 
         return response.status_code == http.HTTPStatus.CREATED
 
@@ -375,52 +413,52 @@ class Pipeline[T: Task = Task]:
         Returns:
             The claimed tasks.
         """
-        log.info("Task claim", num=num)
+        logger().info("Task claim", num=num)
         url = self._task_endpoint() + f"claim/?num_tasks={num}"
         headers = self._headers(self.config.pipeline_token)
         body = self._to_serializable()
 
         response = self._request("POST", url, headers=headers, body=body)
         response.raise_for_status()
-        log.debug("Claim response", response=response.json())
+        logger().debug("Claim response", response=response.json())
 
         claimed = [self._from_serializable(item) for item in response.json()]
-        log.info("Claimed tasks", claimed=claimed)
+        logger().info("Claimed tasks", claimed=claimed)
 
         return claimed
 
     def run(self, task: T) -> T:
-        """Mark a task as running. This should be called after claiming a task."""
-        log.info("Task run", pipeline=self, task=task)
+        """Mark a task as running and return it. This should be called after claiming a task."""
+        logger().info("Task run", pipeline=self, task=task)
         task.status = task.Status.RUNNING
         return self._update_task(task)
 
     def done(self, task: T) -> T:
-        """Mark a task as done successfully."""
-        log.info("Task done", pipeline=self, task=task)
+        """Mark a task as done successfully and return it."""
+        logger().info("Task done", pipeline=self, task=task)
         task.status = task.Status.DONE
         return self._update_task(task)
 
     def fail(self, task: T) -> T:
-        """Mark a task as failed."""
-        log.info("Task fail", pipeline=self, task=task)
+        """Mark a task as failed and return it."""
+        logger().info("Task fail", pipeline=self, task=task)
         task.status = task.Status.FAILED
         return self._update_task(task)
 
     def cancel(self, task: T) -> T:
-        """Mark a task as cancelled."""
-        log.info("Task cancel", pipeline=self, task=task)
+        """Mark a task as cancelled and return it."""
+        logger().info("Task cancel", pipeline=self, task=task)
         task.status = task.Status.CANCELLED
         return self._update_task(task)
 
     def retry(self, task: T) -> T:
-        """Mark a task as pending again. This should be called after a task has
+        """Mark a task as pending again and return it. This should be called after a task has
         succeeded, failed or been cancelled and needs to be retried or re-run."""
-        log.info("Task retry", pipeline=self, task=task)
+        logger().info("Task retry", pipeline=self, task=task)
         task.status = task.Status.PENDING
         return self._update_task(task)
 
-    def _get_tasks(self, status: Task.Status = None) -> list[T]:
+    def _get_tasks(self, status: Task.Status | None = None) -> list[T]:
         """Get all tasks for this pipeline with an optional status filter."""
         url = self._task_endpoint() + f"?pipeline_name={self.name}"
         if status is not None:
@@ -433,7 +471,7 @@ class Pipeline[T: Task = Task]:
         return [self._from_serializable(item) for item in response.json()]
 
     def _update_task(self, task: T) -> T:
-        """Update the status of a task."""
+        """Update the status of a task and return it."""
         url = self._task_endpoint()
         headers = self._headers(self.config.pipeline_token)
         body = self._to_serializable(task)
@@ -443,7 +481,7 @@ class Pipeline[T: Task = Task]:
 
         return self._from_serializable(response.json())
 
-    def _to_serializable(self, task: T = None) -> dict:
+    def _to_serializable(self, task: T | None = None) -> dict:
         """Convert task information to a JSON-serializable dictionary, ready to send
         to a Porch server."""
         pipeline = {
@@ -474,7 +512,7 @@ class Pipeline[T: Task = Task]:
         task.status = status
         return task
 
-    def _request(self, method: str, url: str, headers: dict, body: dict = None):
+    def _request(self, method: str, url: str, headers: dict, body: dict | None = None):
         """Make an HTTP request to a Porch server.
 
         This method will retry the request up to 3 times with an exponential backoff
@@ -486,17 +524,21 @@ class Pipeline[T: Task = Task]:
         wait = 15
 
         for attempt in range(num_attempts):
-            log.debug("Request", method=method, url=url, body=body)
+            logger().debug("Request", method=method, url=url, body=body)
             try:
                 response = requests.request(
                     method, url, headers=headers, json=body, timeout=self.timeout
                 )
-                log.debug("Response", status_code=response.status_code, attempt=attempt)
+                logger().debug(
+                    "Response", status_code=response.status_code, attempt=attempt
+                )
 
                 return response
             except Exception as e:
                 last_error = e
-                log.error("Request failed", error=str(e), attempt=attempt, waiting=wait)
+                logger().error(
+                    "Request failed", error=str(e), attempt=attempt, waiting=wait
+                )
                 time.sleep(wait)
                 wait *= 2
 
@@ -508,11 +550,14 @@ class Pipeline[T: Task = Task]:
     def _task_endpoint(self) -> str:
         return urljoin(self.config.url, "tasks/")
 
+    def _version_endpoint(self) -> str:
+        return urljoin(self.config.url, "versions/")
+
     def __repr__(self):
         return f"Pipeline({self.name}, {self.uri}, {self.version})"
 
     @staticmethod
-    def _headers(token: str = None) -> dict:
+    def _headers(token: str) -> dict:
         return {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",

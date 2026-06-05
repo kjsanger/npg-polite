@@ -38,13 +38,13 @@ def porch_server_available() -> bool:
     try:
         response = requests.request("GET", config.url, timeout=5)
         return response.status_code == 200
-    except (requests.ConnectionError, HTTPError):
+    except requests.ConnectionError, HTTPError:
         return False
     except Exception:
         raise
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def porch_server_config() -> Pipeline.ServerConfig:
     return IniData(Pipeline.ServerConfig).from_file(
         TEST_CONFIG_FILE, TEST_CONFIG_SECTION

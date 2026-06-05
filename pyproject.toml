@@ -19,15 +19,15 @@ dynamic = ["version"]
 requires-python = ">=3.14"
 
 dependencies = [
-    "requests",
-    "structlog",
-    "npg-python-lib @ https://github.com/wtsi-npg/npg-python-lib/releases/download/1.2.0/npg_python_lib-1.2.0.tar.gz"
+    "requests >=2.34",
+    "structlog >=25",
+    "npg-python-lib >= 2.0.0"
 ]
 
 [project.optional-dependencies]
 test = [
     "black >=26",
-    "pytest",
+    "pytest >= 9",
     "pytest-it >=0.1.5"
 ]
 

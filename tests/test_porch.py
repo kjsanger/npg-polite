@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright © 2024 Genome Research Ltd. All rights reserved.
+# Copyright © 2024, 2026 Genome Research Ltd. All rights reserved.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
 #
 
 import os
+from dataclasses import replace
 from decimal import Decimal
 from uuid import uuid4
 
@@ -43,7 +44,7 @@ class ExampleTask(Task):
         item: str,
         quantity: int = 1,
         price: Decimal = Decimal("0.00"),
-        uuid: str = None,
+        uuid: str | None = None,
     ):
         super().__init__(Task.Status.PENDING)
         self.item = item
@@ -110,6 +111,23 @@ class TestPorchPipeline:
         )
 
         assert p.register() == p
+
+    @m.context("When a pipline is registered and config update is requested")
+    @m.it("Updates the config with a new pipeline token")
+    def test_register_pipeline_new_token(self, porch_server_config):
+        tmp_config = replace(porch_server_config)
+        assert tmp_config.pipeline_token is None
+
+        p = Pipeline(
+            ExampleTask,
+            name="test_register_pipeline_new_token",
+            uri="http://www.sanger.ac.uk",
+            version=version(),
+            config=tmp_config,
+        )
+        p = p.register(update_config=True)
+
+        assert p.config.pipeline_token is not None
 
     @m.context("After a pipeline is registered")
     @m.it("Can create a new token")

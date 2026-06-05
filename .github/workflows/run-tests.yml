@@ -8,7 +8,7 @@ jobs:
 
     services:
       porch:
-        image: "ghcr.io/wtsi-npg/python-3.10-npg-porch-2.0.0"
+        image: "ghcr.io/wtsi-npg/python-3.14-npg-porch-3.0"
         ports:
           - "8081:8081"
         options: >-

@@ -2,7 +2,7 @@
 
 ## Po(rch) Lite
 
-A minimnal, task-centric API for interacting with a [Porch](https://github.com/wtsi-npg/npg_porch_cli) server.
+A minimal, task-centric API for interacting with a [Porch](https://github.com/wtsi-npg/npg_porch_cli) server.
 
 # Summary
 
@@ -115,6 +115,15 @@ When this is done, you can create a new Pipeline and add tasks to it:
     for task in tasks:
         p.add(task)
 
+If you are using Porch 3.0.0 or later, then registering a new pipeline requires both an admin
+and pipeline token. As the latter doesn't yet exist, one is created on the fly, and you can opt
+to capture this token into the active in-memory config instance.
+
+    p = Pipeline(SumTask, "Sum of two integers", "http://localhost/sum", "1.0.0")
+    p = p.register(update_config=True)
+
+However, if you want to persist the token beyond the session, it is then up to you to store the
+config appropriately.
 
 Once tasks are added, you can claim and update their status as they are processed:
 
