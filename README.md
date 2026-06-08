@@ -16,25 +16,24 @@ server, presenting a pipleline- and task-centric API instead.
 This package includes a `Pipeline.ServerConfig` dataclass to collect external configuration for
 a pipeline in one place where it can be passed to the Pipeline constructor.
 
-As this is a dataclass, instances can be created from a named section of a configuration INI
-file using the [npg-python-lib](https://github.com/wtsi-npg/npg-python-lib) `npg.conf.IniData`
-class.
-
-If an INI file is not provided, a default configuration will be used which relies on environment
-variables.
-
 The configurable values are:
 
-- url: The base URL of the Porch server (defaults to the PORCH_URL environment variable).
-- pipeline_token: The pipeline token for the Porch server (defaults to the PORCH_PIPELINE_TOKEN environment variable).
-- admin_token: The admin token for the Porch server (defaults to the PORCH_ADMIN_TOKEN environment variable).
+- url: The base URL of the Porch server.
+- pipeline_token: The pipeline token for the Porch server.
+- admin_token: The admin token for the Porch server.
 
-As the tokens are sensitive information, it is preferable not to use environment variables to set them
-because they may be leaked via the process environment. Instead, use an INI file. The tokens do not appear
-in the string representation of the dataclass, to reduce the risk of leaking them in logs.
+A configuration instance can be created directly and populated with tokens obtained from a secrets
+manager. E.g.
 
-If any of these values is set explicitly, that value will be used in preference to the corresponding
-environment variable.
+    config = ServerConfig(
+        porch_url="https://example.com/porch",
+        admin_token=token1,
+        pipeline_token=token2,
+    )
+
+Alternatively, configuration (and possibly tokens) can be read from a file. As this is a dataclass,
+instances can be created from a named section of a configuration INI file using the
+[npg-python-lib](https://github.com/wtsi-npg/npg-python-lib) `npg.conf.IniData` class.
 
 An example INI file would look like this:
 
@@ -42,7 +41,6 @@ An example INI file would look like this:
     url = http://localhost:8000
     pipeline_token = 11111111111111111111111111111111
     admin_token = 0000000000000000000000000000000
-
 
 The corresponding code to populate the `ServerConfig` dataclass would look like this:
 

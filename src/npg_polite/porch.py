@@ -193,34 +193,18 @@ class Pipeline[T: Task = Task]:
         """Configuration for a Porch pipeline server.
 
         This exists to collect external configuration for a pipeline in one place
-        where it can be passed to the pipeline constructor. If not provided, a
-        default configuration will be used which relies on environment variables.
+        where it can be passed to the pipeline constructor.
 
-        The configurable values are:
+        A configuration instance can be created directly and populated with tokens
+        obtained from a secrets manager. E.g.
 
-        - porch_url: The base URL of the Porch server (defaults to the PORCH_URL
-            environment variable).
-        - admin_token: The admin token for the Porch server (defaults to the
-            PORCH_ADMIN_TOKEN environment variable).
-        - pipeline_token: The pipeline token for the Porch server (defaults to the
-            PORCH_PIPELINE_TOKEN environment variable).
+            config = ServerConfig(
+                porch_url="https://example.com/porch",
+                admin_token=token1,
+                pipeline_token=token2,
+            )
 
-        If any of these values is set explicitly, that value will be used in preference
-        to the corresponding environment variable.
-
-        e.g.
-
-        [<section name>]
-        url = http://localhost:8000
-        pipeline_token = 11111111111111111111111111111111
-        admin_token = 0000000000000000000000000000000
-
-        As this is a dataclass, instances can be created from an INI file using the
-        `IniData` class in the `conf` module:
-
-        e.g.
-
-        server_config = IniData(ServerConfig).from_file(<file name>, <section name>)
+        Alternatively, configuration (and possibly tokens) can be read from a file.
 
         The token fields are set to not be included in the repr() output to avoid
         leaking sensitive information in logs.
