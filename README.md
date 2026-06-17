@@ -161,7 +161,7 @@ either start the server and run tests against it from the host machine:
     pytest --it
 
 Alternatively, you can run the tests in a Docker container built using the included `Dockerfile.dev` which
-will install automatically install the package and its dependencies in a virtual environment and activate
+will automatically install the package and its dependencies in a virtual environment and activate
 the environment before running the tests:
 
     docker compose build
