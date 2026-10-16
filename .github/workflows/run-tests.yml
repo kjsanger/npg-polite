@@ -1,6 +1,6 @@
 name: "Unit tests"
 
-on: [push, pull_request]
+on: [ push, pull_request ]
 
 jobs:
   build:
@@ -8,7 +8,7 @@ jobs:
 
     services:
       porch:
-        image: "ghcr.io/wtsi-npg/python-3.14-npg-porch-3.0"
+        image: "ghcr.io/wtsi-npg/python-3.14-npg-porch-3.0:latest"
         ports:
           - "8081:8081"
         options: >-
@@ -23,7 +23,7 @@ jobs:
 
     strategy:
       matrix:
-        python-version: ["3.13", "3.14"]
+        python-version: [ "3.13", "3.14" ]
 
     steps:
       - uses: actions/checkout@v6

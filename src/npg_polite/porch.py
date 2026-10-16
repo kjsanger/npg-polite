@@ -19,7 +19,7 @@ import http
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, auto
 from typing import Any, Self, cast
 from urllib.parse import urljoin
 
@@ -43,6 +43,10 @@ class PoliteError(Exception):
 
 
 class PolitePrivilegeError(PoliteError):
+    pass
+
+
+class PoliteVersionError(PoliteError):
     pass
 
 
@@ -122,6 +126,68 @@ class Task(ABC):
         raise NotImplementedError
 
 
+def parse_semver(version: str) -> tuple[str, str, str]:
+    parts = version.split(".")
+    if not len(parts) == 3:
+        raise PoliteVersionError(f"Invalid semantic version '{version}'")
+    major, minor, patch = parts
+
+    return major, minor, patch
+
+
+class CompatibilityPolicy(Enum):
+    """A policy influencing how a pipeline exposes its local versioning to the Porch
+    server.
+
+    Attributes:
+        EXACT: The pipeline reports its version exactly as-is e.g. "1.0.1". This means
+            that even patch level version changes will behave as new pipeline versions
+            and tasks with the same payload will not be identical across patch-level
+            changes. Any change to the pipeline version will permit re-work.
+        MAJOR_MINOR: The pipeline reports only major and minor semver version
+            components. Tasks with the same payload and different pipeline patch
+            versions will be identical, so patches will not permit re-work. The
+            pipeline version must be semver format.
+        MAJOR: As MAJOR_MINOR, but only the major semver component is reported.
+        CUSTOM: A custom version identifier, independent of the pipeline version will
+            be reported. This may be appropriate where important pipeline behavioural
+            changes are not linked to the pipeline version.
+    """
+
+    EXACT = auto()
+    MAJOR_MINOR = auto()
+    MAJOR = auto()
+    CUSTOM = auto()
+
+    def compatible_version(self, version: str, custom: str | None = None) -> str:
+        """Return a compatible pipeline version according to policy.
+
+        Args:
+            version: The local version.
+            custom: A custom version to use where policy requires. Optional.
+
+        Returns:
+            A version that indicates compatibility.
+        """
+        match self:
+            case CompatibilityPolicy.EXACT:
+                return version
+            case CompatibilityPolicy.MAJOR_MINOR:
+                major, minor, _ = parse_semver(version)
+                return f"{major}.{minor}"
+            case CompatibilityPolicy.MAJOR:
+                major, _, _ = parse_semver(version)
+                return major
+            case CompatibilityPolicy.CUSTOM:
+                if custom is None:
+                    raise PoliteVersionError(
+                        f"No custom version was supplied for '{version}"
+                    )
+                return custom
+            case _:
+                raise PoliteError(f"Unexpected compatibility policy '{self}")
+
+
 class Pipeline[T: Task = Task]:
     """A Porch "pipeline".
 
@@ -196,10 +262,6 @@ class Pipeline[T: Task = Task]:
     This class uses the Porch REST API. See the Porch documentation for more
     information. It has a timeout of 10 seconds and will retry failed requests up to 3
     times with an exponential backoff starting at 15 seconds.
-
-    Note: We could consider using only the first or first and second parts of the
-    (SemVer) version number. This would allow bug-fix releases to be made that could
-    re-run existing tasks for that version.
     """
 
     @dataclass
@@ -234,11 +296,20 @@ class Pipeline[T: Task = Task]:
     uri: str
     version: str
     config: ServerConfig
+    compat_policy: CompatibilityPolicy
+    compat_version: str | None
 
     timeout: float | int
 
     def __init__(
-        self, cls: type[T], name: str, uri: str, version: str, config: ServerConfig
+        self,
+        cls: type[T],
+        name: str,
+        uri: str,
+        version: str,
+        config: ServerConfig,
+        compat_policy: CompatibilityPolicy = CompatibilityPolicy.EXACT,
+        compat_version=None,
     ):
         """Create a new pipeline with no pipeline access token set.
 
@@ -248,6 +319,11 @@ class Pipeline[T: Task = Task]:
             uri: The pipeline URI.
             version: The pipeline version.
             config: The configuration for the pipeline server.
+            compat_policy: The compatibility policy between different versions of the
+                pipeline. Defaults to being EXACT i.e. any change to the pipeline's
+                version will be exposed to the server.
+            compat_version: An custom compatibility version to be used with the
+                CUSTOM compatibility policy. Defaults to None.
         """
 
         # Note that the task class is passed explicitly to the constructor because
@@ -276,8 +352,13 @@ class Pipeline[T: Task = Task]:
         self.uri = uri
         self.version = version
         self.config = config
+        self.compat_policy = compat_policy
+        self.compat_version = compat_version
 
         self.timeout = 10
+
+    def compatible_version(self) -> str:
+        return self.compat_policy.compatible_version(self.version, self.compat_version)
 
     def register(self, update_config: bool = False) -> Self:
         """Register the pipeline with a Porch server.
@@ -516,7 +597,7 @@ class Pipeline[T: Task = Task]:
         pipeline = {
             "name": self.name,
             "uri": self.uri,
-            "version": self.version,
+            "version": self.compatible_version(),
         }
 
         if task is None:
@@ -592,7 +673,11 @@ class Pipeline[T: Task = Task]:
         return urljoin(self.config.url, "versions/")
 
     def __repr__(self):
-        return f"Pipeline({self.name}, {self.uri}, {self.version})"
+        return (
+            f"Pipeline({self.name} URI: {self.uri} "
+            f"compatible version: {self.compatible_version()} "
+            f"version: {self.version})"
+        )
 
     @staticmethod
     def _headers(token: str) -> dict[str, str]:

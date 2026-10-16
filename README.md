@@ -1,6 +1,6 @@
 # npg-polite
 
-## Po(rch) Lite
+## Po (rch) Lite
 
 A minimal, task-centric API for interacting with a [Porch](https://github.com/wtsi-npg/npg_porch_cli) server.
 
@@ -46,9 +46,8 @@ The corresponding code to populate the `ServerConfig` dataclass would look like 
 
     server_config = IniData(Pipeline.ServerConfig).from_file(<file name>, <section name>)
 
-The token fields are set to not be included in the repr() output to avoid leaking sensitive
+The token fields are set to not be included in the repr () output to avoid leaking sensitive
 information in logs.
-
 
 ### Creating Piplines and Tasks on a Porch server
 
@@ -56,7 +55,7 @@ A [Porch](https://github.com/wtsi-npg/npg_porch) pipeline is type of pub/sub que
 are added by one process and later claimed and processed by another.
 
 In this API a `Pipeline` instance represents a kind of pipeline on the Porch server, with the
-pipeline name, URI  and version as its identity. A `Task` represents an instance of the pipeline
+pipeline name, URI and version as its identity. A `Task` represents an instance of the pipeline
 doing some work and consequently changing state.
 
 When a new Pipeline is created, it must be registered with the Porch server before tasks can be
@@ -72,7 +71,7 @@ same inputs are considered the same task. Porch uses this to try to ensure that 
 and processed once.
 
 To use this module for a new Pipeline, you need to create a subclass of `Pipeline.Task` and implement
-the `to_serializable` and `from_serializable` methods. See the 
+the `to_serializable` and `from_serializable` methods. See the
 [Porch](https://github.com/wtsi-npg/npg_porch) documentation for more information on how the task
 attributes and values are serialized as JSON.
 
@@ -139,6 +138,32 @@ The Pipeline class uses the  [Porch](https://github.com/wtsi-npg/npg_porch) REST
 for more information. It has a timeout of 10 seconds and will retry failed requests up to 3 times
 with an exponential backoff starting at 15 seconds.
 
+### Included Tasks
+
+### Reusable shell-command tasks
+
+`ShellCommandTask` runs trusted Bash commands that are defined as a command template
+plus named string-valued parameters:
+
+```python
+from npg_polite.task import ShellCommandTask
+
+task = ShellCommandTask(
+        command="process-data --from {:start:} --to {:end:}",
+        params={
+                "start": "2026-09-24T00:00:00Z",
+                "end": "2026-09-25T00:00:00Z",
+        },
+)
+```
+
+Parameters are interpolated into placeholders of the form `{:name:}` where the literal
+`name` corresponds to its name. No whitespace is permitted between the `{:` and `:}`
+delimiter. Parameter names must match the regular expression `[A-Za-z_][A-Za-z0-9_]*`
+and values must be strings. Each value is quoted using `shlex.quote()` and then
+inserted into the template, replacing the placeholder.
+
+See the ShellCommandTask class docstring for more details.
 
 ## Development
 
