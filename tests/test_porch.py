@@ -19,6 +19,7 @@
 import os
 from dataclasses import replace
 from decimal import Decimal
+from typing import Any
 from uuid import uuid4
 
 from npg.conf import IniData
@@ -26,11 +27,7 @@ from pytest import mark as m, raises
 
 from conftest import TEST_CONFIG_FILE, TEST_CONFIG_SECTION, porch_server_available
 from npg_polite import version
-from npg_polite.porch import Pipeline, Task
-
-porch_server_is_up = m.skipif(
-    not porch_server_available(), reason="Test Porch server is not available"
-)
+from npg_polite.porch import CompatibilityPolicy, Pipeline, PoliteVersionError, Task
 
 
 class ExampleTask(Task):
@@ -52,7 +49,7 @@ class ExampleTask(Task):
         self.price = Decimal(price)
         self.uuid = uuid if uuid is not None else uuid4().hex
 
-    def to_serializable(self) -> dict:
+    def to_serializable(self) -> dict[str, Any]:
         return {
             "item": self.item,
             "quantity": self.quantity,
@@ -61,7 +58,7 @@ class ExampleTask(Task):
         }
 
     @classmethod
-    def from_serializable(cls, serializable: dict):
+    def from_serializable(cls, serializable: dict[str, Any]):
         return cls(**serializable)
 
     def __repr__(self):
@@ -132,8 +129,85 @@ class TestPorchTask:
             hash(task)
 
 
+@m.describe("Pipeline compatibility policies")
+class TestCompatibilityPolicy:
+    @m.context("When a compatibility policy is applied")
+    @m.it("Reports the expected version to Porch and preserves the release version")
+    @m.parametrize(
+        "policy, custom, expected",
+        [
+            (CompatibilityPolicy.EXACT, None, "1.2.3"),
+            (CompatibilityPolicy.MAJOR_MINOR, None, "1.2"),
+            (CompatibilityPolicy.MAJOR, None, "1"),
+            (CompatibilityPolicy.CUSTOM, "workflow-v2", "workflow-v2"),
+        ],
+        ids=["exact", "major-minor", "major", "custom"],
+    )
+    def test_compatible_version(self, policy, custom, expected):
+        assert policy.compatible_version("1.2.3", custom) == expected
+
+        pipeline = Pipeline(
+            ExampleTask,
+            name="compatibility-test",
+            uri="https://example.com/pipeline",
+            version="1.2.3",
+            config=Pipeline.ServerConfig(url="http://localhost"),
+            compat_policy=policy,
+            compat_version=custom,
+        )
+        task = ExampleTask(item="bread")
+
+        assert pipeline.compatible_version() == expected
+        assert pipeline.version == "1.2.3"
+        assert pipeline._to_serializable()["version"] == expected
+        assert pipeline._to_serializable(task)["pipeline"]["version"] == expected
+
+    @m.context("When no compatibility policy is supplied")
+    @m.it("Uses the exact release version")
+    def test_default_policy(self):
+        pipeline = Pipeline(
+            ExampleTask,
+            name="compatibility-test",
+            uri="https://example.com/pipeline",
+            version="1.2.3",
+            config=Pipeline.ServerConfig(url="http://localhost"),
+        )
+
+        assert pipeline.compat_policy is CompatibilityPolicy.EXACT
+        assert pipeline.compatible_version() == "1.2.3"
+
+    @m.context("When an exact or custom policy receives a non-semantic version")
+    @m.it("Does not require semantic version parsing")
+    @m.parametrize(
+        "policy, custom, expected",
+        [
+            (CompatibilityPolicy.EXACT, None, "release-tag"),
+            (CompatibilityPolicy.CUSTOM, "workflow-v2", "workflow-v2"),
+        ],
+        ids=["exact", "custom"],
+    )
+    def test_non_semantic_version(self, policy, custom, expected):
+        assert policy.compatible_version("release-tag", custom) == expected
+
+    @m.context("When a semantic version policy receives the wrong number of components")
+    @m.it("Raises a version error")
+    @m.parametrize(
+        "policy", [CompatibilityPolicy.MAJOR_MINOR, CompatibilityPolicy.MAJOR]
+    )
+    @m.parametrize("release_version", ["1", "1.2", "1.2.3.4"])
+    def test_invalid_semantic_version(self, policy, release_version):
+        with raises(PoliteVersionError, match="Invalid semantic version"):
+            policy.compatible_version(release_version)
+
+    @m.context("When the custom policy has no custom version")
+    @m.it("Raises a version error")
+    def test_missing_custom_version(self):
+        with raises(PoliteVersionError, match="No custom version was supplied"):
+            CompatibilityPolicy.CUSTOM.compatible_version("1.2.3")
+
+
 @m.describe("Porch Pipeline")
-@porch_server_is_up
+@m.skipif(not porch_server_available(), reason="Test Porch server is not available")
 class TestPorchPipeline:
     @m.context("When configured from an INI file")
     @m.it("Loads the configuration")
@@ -232,6 +306,35 @@ class TestPorchPipeline:
         assert task2 in p.all()
 
         assert not p.add(task1)  # False because task is already present
+
+    @m.context("When identical tasks are submitted to different pipeline versions")
+    @m.it("Creates a separate task for each version and rejects duplicates within it")
+    def test_add_task_different_pipeline_versions(self, porch_server_config):
+        name = f"test-task-versions-{uuid4().hex}"
+        pipelines = [
+            Pipeline(
+                ExampleTask,
+                name=name,
+                uri="http://www.sanger.ac.uk",
+                version=pipeline_version,
+                config=porch_server_config,
+            ).register(update_config=True)
+            for pipeline_version in ("1.0.0", "2.0.0")
+        ]
+        task = ExampleTask(item="bread", quantity=2, price=Decimal("4.20"))
+
+        for pipeline in pipelines:
+            assert pipeline.add(task), f"Create task for version {pipeline.version}"
+
+        for pipeline in pipelines:
+            assert not pipeline.add(
+                task
+            ), f"Reject duplicate task for version {pipeline.version}"
+
+        # all() lists by pipeline name, including tasks from both versions.
+        tasks = pipelines[0].all()
+        assert len(tasks) == 2
+        assert tasks.count(task) == 2
 
     @m.context("After a task has been added to a pipeline")
     @m.it("Can be claimed")
