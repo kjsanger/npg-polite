@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright © 2025 Genome Research Ltd. All rights reserved.
+# Copyright © 2025, 2026 Genome Research Ltd. All rights reserved.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -16,9 +16,10 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-import importlib
 
-__version__ = importlib.metadata.version("npg-polite")
+from importlib import metadata
+
+__version__ = metadata.version("npg-polite")
 
 
 def version() -> str:
