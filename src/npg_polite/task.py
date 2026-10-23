@@ -17,6 +17,7 @@
 
 """Provide reusable tasks for trusted shell commands."""
 
+import datetime
 import math
 import os
 import re
@@ -24,8 +25,10 @@ import shlex
 import signal
 import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, timedelta
 from types import MappingProxyType
-from typing import Any, Self
+from typing import Any, Callable, Self
 
 from structlog import get_logger
 
@@ -300,11 +303,7 @@ class ShellCommandTask(Task):
         try:
             pid = process.pid
             logger().info(
-                "Shell task started",
-                command=command,
-                cwd=cwd,
-                timeout=timeout,
-                pid=pid,
+                "Shell task started", command=command, cwd=cwd, timeout=timeout, pid=pid
             )
             logger().debug("Shell task environment", pid=pid)
 
@@ -316,6 +315,9 @@ class ShellCommandTask(Task):
         except Exception:
             self._terminate(command, process)
             raise
+
+    def __repr__(self):
+        return f"ShellCommandTask('{self.command}', {self.params})"
 
     @staticmethod
     def _terminate(command: str, process: subprocess.Popen[bytes]) -> None:
@@ -344,3 +346,135 @@ class ShellCommandTask(Task):
 
             process.wait()
             log.debug("Shell task exited")
+
+
+@dataclass(frozen=True)
+class DatetimeParam:
+    """A named datetime parameter for a ShellCommandTask.
+
+    Attributes:
+        name: The parameter name.
+        datetime: The parameter value.
+    """
+
+    name: str
+    datetime: datetime.datetime
+
+    def __post_init__(self):
+        if self.datetime is not None and self.datetime.tzinfo != UTC:
+            raise ValueError(
+                f"Datetime parameter '{self.name}' is not UTC: '{self.datetime.tzname()}'"
+            )
+
+    def __repr__(self) -> str:
+        return f"{self.name}:{self.datetime.isoformat()}"
+
+
+type IntervalBounds = tuple[DatetimeParam, DatetimeParam]
+type ParamFactory = Callable[[DatetimeParam, DatetimeParam], Mapping[str, str]]
+
+
+def make_interval_tasks(
+    command: str,
+    begin: DatetimeParam,
+    end: DatetimeParam,
+    interval: timedelta,
+    shared_params: Mapping[str, str] | None,
+    param_factory: ParamFactory | None = None,
+) -> list[ShellCommandTask]:
+    """Return a sequence of command line tasks whose time spans of length ``interval``
+    lie between the overall ``begin`` and ``end`` times. If ``interval`` does not fit
+    into the range a whole number of times, the final interval will be partial.
+
+    It is left to the Pipeline to determine when the commands will be run, which is
+    likely to be application-specific.
+
+    Examples:
+
+    - A command that runs a batch operation on the output of a process that has run during the interval, executing at the end.
+
+    - A command that creates a resource needed by a batch of work during the interval, executing at the start.
+
+    Tasks are validated at the time of construction, so any additional parameters
+    required by the template must be provided. Additional parameters that will be the
+    same for all intervals may be supplied as ``shared_params``. There are cases
+    where parameters may need to vary by interval; these can be passed via a
+    ``param_factory``.
+
+    Examples:
+
+    - A command that selects its input by date.
+
+    - A command that writes a separate log file for each interval.
+
+    - An aggregation setting based on interval length, including a partial final interval.
+
+    Args:
+        command: The shell command template.
+        begin: The time at which to start the first time interval.
+        end: The time at which to end the last time interval.
+        interval: The duration of each interval.
+        shared_params: Any other parameters required by all the intervals.
+        param_factory: A function to generate additional parameters that vary by
+            interval. The function must accept the ``begin`` and ``end`` parameters of
+            an interval and return a parameter mapping.
+
+    Returns:
+        A list of tasks.
+    """
+    if end.datetime < begin.datetime:
+        raise ValueError(
+            f"Invalid time range: end ({end.datetime.isoformat()}) is earlier than "
+            f"begin ({begin.datetime.isoformat()})"
+        )
+
+    num_intervals = (end.datetime - begin.datetime) / interval
+    num_whole = math.ceil(num_intervals)
+    if num_whole > num_intervals:
+        logger().warn(
+            "The interval requested does not fit exactly in the date range. "
+            "The last interval will be partial",
+            command=command,
+            begin=begin,
+            end=end,
+            interval=interval,
+            num_intervals=num_intervals,
+            num_whole=num_whole,
+        )
+
+    tasks = []
+    for i, j in zip(range(0, num_whole), range(1, num_whole + 1)):
+        interval_begin = begin.datetime + interval * i
+        interval_end = begin.datetime + interval * j
+
+        # Trim any (rounded up) partial interval if it passes the requested end
+        if interval_end > end.datetime:
+            interval_end = end.datetime
+
+        _params = {
+            begin.name: interval_begin.isoformat(),
+            end.name: interval_end.isoformat(),
+        }
+        if shared_params is not None:
+            for k in _params.keys():
+                if k in shared_params:
+                    raise ValueError(
+                        f"Name clash between '{k}' parameter and shared parameters: {shared_params}"
+                    )
+            _params.update(shared_params)
+
+        if param_factory is not None:
+            dynamic_params = param_factory(
+                DatetimeParam(begin.name, interval_begin),
+                DatetimeParam(end.name, interval_end),
+            )
+            for k in _params.keys():
+                if k in dynamic_params:
+                    raise ValueError(
+                        f"Name clash between '{k}' parameter and dynamic parameters: {dynamic_params}"
+                    )
+            _params.update(dynamic_params)
+
+        tasks.append(ShellCommandTask(command, params=_params))
+
+    return tasks
