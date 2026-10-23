@@ -21,15 +21,22 @@ import operator
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 from socket import socket
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
 from pytest import mark as m, raises
 
 from npg_polite.porch import Pipeline, Task
-from npg_polite.task import ShellCommandTask
+from npg_polite.task import (
+    DatetimeParam,
+    IntervalBounds,
+    ShellCommandTask,
+    make_interval_tasks,
+)
 from tests.conftest import porch_server_available
 
 
@@ -259,7 +266,7 @@ class TestShellExecution:
 
 @m.describe("Shell task execution with Porch")
 @m.skipif(not porch_server_available, reason="Test Porch server is not available")
-class TestShellPorch:
+class TestShellCommandPorch:
     @m.context("When producers submit overlapping sets of UTC periods")
     @m.it("Creates only missing tasks and prevents concurrent duplicate claims")
     def test_overlapping_periods(
@@ -338,3 +345,145 @@ class TestShellPorch:
         pipeline.done(retried)
         assert pipeline.succeeded() == [task]
         assert output.read_text() == f"{task.params['start']}/{task.params['end']}"
+
+
+@m.describe("Interval task creation")
+class TestIntervalTasks:
+    @m.context("When the interval fits exactly within the overall time span")
+    @m.it("Creates the expected number of complete interval tasks")
+    @m.parametrize("hours, boundaries", [(1, [0, 1, 2, 3]), (3, [0, 3])])
+    def test_whole_interval_creation(
+        self, interval_bounds: IntervalBounds, hours, boundaries
+    ):
+        begin, end = interval_bounds
+        command = "echo {:start:} {:stop:}"
+
+        tasks = make_interval_tasks(command, begin, end, timedelta(hours=hours), None)
+
+        assert len(tasks) == len(boundaries) - 1
+        assert [task.params for task in tasks] == [
+            {
+                "start": (begin.datetime + timedelta(hours=start)).isoformat(),
+                "stop": (begin.datetime + timedelta(hours=stop)).isoformat(),
+            }
+            for start, stop in zip(boundaries, boundaries[1:])
+        ]
+        assert all(task.command == command for task in tasks)
+        assert all(task.status == Task.Status.PENDING for task in tasks)
+
+    @m.context("When the interval does not fit exactly within the overall time span")
+    @m.it(
+        "Creates the expected number of complete interval tasks, plus a partial interval"
+    )
+    @m.parametrize("hours, boundaries", [(2, [0, 2, 3]), (4, [0, 3])])
+    def test_partial_interval_creation(
+        self, interval_bounds: IntervalBounds, hours, boundaries
+    ):
+        begin, end = interval_bounds
+
+        tasks = make_interval_tasks(
+            "echo {:start:} {:stop:}", begin, end, timedelta(hours=hours), None
+        )
+
+        assert len(tasks) == len(boundaries) - 1
+        assert [task.params for task in tasks] == [
+            {
+                "start": (begin.datetime + timedelta(hours=start)).isoformat(),
+                "stop": (begin.datetime + timedelta(hours=stop)).isoformat(),
+            }
+            for start, stop in zip(boundaries, boundaries[1:])
+        ]
+
+    @m.context("When shared parameters are supplied")
+    @m.it("Creates tasks that all have those parameters")
+    def test_shared_parameters(self, interval_bounds: IntervalBounds):
+        begin, end = interval_bounds
+        shared = {"dataset": "run 42", "output": "/tmp/results"}
+        command = "echo {:start:} {:stop:} {:dataset:} {:output:}"
+
+        tasks = make_interval_tasks(command, begin, end, timedelta(hours=1), shared)
+
+        assert len(tasks) == 3
+        assert shared == {"dataset": "run 42", "output": "/tmp/results"}
+        for hour, task in enumerate(tasks):
+            assert task.command == command
+            assert task.params == {
+                "start": (begin.datetime + timedelta(hours=hour)).isoformat(),
+                "stop": (begin.datetime + timedelta(hours=hour + 1)).isoformat(),
+                "dataset": "run 42",
+                "output": "/tmp/results",
+            }
+
+    @m.context("When a parameter factory is supplied")
+    @m.it("Creates tasks that have the expected dynamically generated parameters")
+    def test_parameter_factory(self, interval_bounds: IntervalBounds):
+        begin, end = interval_bounds
+        calls: list[tuple[DatetimeParam, DatetimeParam]] = []
+
+        def make_params(start: DatetimeParam, stop: DatetimeParam):
+            calls.append((start, stop))
+            return {
+                "log": f"{start.datetime:%Y%m%dT%H%M}.log",
+                "seconds": str(int((stop.datetime - start.datetime).total_seconds())),
+            }
+
+        command = "echo {:start:} {:stop:} {:dataset:} {:log:} {:seconds:}"
+        tasks = make_interval_tasks(
+            command,
+            begin,
+            end,
+            timedelta(hours=2),
+            {"dataset": "run 42"},
+            make_params,
+        )
+
+        assert len(tasks) == 2
+        midpoint = begin.datetime + timedelta(hours=2)
+        assert [task.params for task in tasks] == [
+            {
+                "start": begin.datetime.isoformat(),
+                "stop": midpoint.isoformat(),
+                "dataset": "run 42",
+                "log": "20260121T0000.log",
+                "seconds": "7200",
+            },
+            {
+                "start": midpoint.isoformat(),
+                "stop": end.datetime.isoformat(),
+                "dataset": "run 42",
+                "log": "20260121T0200.log",
+                "seconds": "3600",
+            },
+        ]
+        assert calls == [
+            (begin, DatetimeParam("stop", midpoint)),
+            (DatetimeParam("start", midpoint), end),
+        ]
+
+    @m.context("When shared or dynamic parameter names clash with existing parameters")
+    @m.it("Raises ValueError at task construction")
+    @m.parametrize(
+        "shared, dynamic, name, source",
+        [
+            ({"start": "replacement"}, None, "start", "shared"),
+            ({"stop": "replacement"}, None, "stop", "shared"),
+            (None, {"start": "replacement"}, "start", "dynamic"),
+            (None, {"stop": "replacement"}, "stop", "dynamic"),
+            ({"dataset": "shared"}, {"dataset": "dynamic"}, "dataset", "dynamic"),
+        ],
+    )
+    def test_parameter_name_clash(
+        self, interval_bounds: IntervalBounds, shared, dynamic, name, source
+    ):
+        begin, end = interval_bounds
+        factory = None if dynamic is None else Mock(return_value=dynamic)
+
+        with raises(ValueError, match=f"Name clash between '{name}'.*{source}"):
+            make_interval_tasks(
+                "echo {:start:} {:stop:}",
+                begin,
+                end,
+                timedelta(hours=1),
+                shared,
+                factory,
+            )

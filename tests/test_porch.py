@@ -146,14 +146,18 @@ class TestCompatibilityPolicy:
     def test_compatible_version(self, policy, custom, expected):
         assert policy.compatible_version("1.2.3", custom) == expected
 
-        pipeline = Pipeline(
-            ExampleTask,
+        config = Pipeline.Config(
             name="compatibility-test",
             uri="https://example.com/pipeline",
             version="1.2.3",
-            config=Pipeline.ServerConfig(url="http://localhost"),
             compat_policy=policy,
             compat_version=custom,
+        )
+
+        pipeline = Pipeline(
+            ExampleTask,
+            config=config,
+            server_config=Pipeline.ServerConfig(url="http://localhost"),
         )
         task = ExampleTask(item="bread")
 
@@ -165,12 +169,16 @@ class TestCompatibilityPolicy:
     @m.context("When no compatibility policy is supplied")
     @m.it("Uses the exact release version")
     def test_default_policy(self):
-        pipeline = Pipeline(
-            ExampleTask,
+        config = Pipeline.Config(
             name="compatibility-test",
             uri="https://example.com/pipeline",
             version="1.2.3",
-            config=Pipeline.ServerConfig(url="http://localhost"),
+        )
+
+        pipeline = Pipeline(
+            ExampleTask,
+            config=config,
+            server_config=Pipeline.ServerConfig(url="http://localhost"),
         )
 
         assert pipeline.compat_policy is CompatibilityPolicy.EXACT
@@ -240,84 +248,91 @@ class TestPorchPipeline:
     @m.context("When a pipeline has been defined")
     @m.it("Can be registered")
     def test_register_pipeline(self, porch_server_config):
-        p = Pipeline(
-            ExampleTask,
+        config = Pipeline.Config(
             name="test_register_pipeline",
             uri="http://www.sanger.ac.uk",
             version=version(),
-            config=porch_server_config,
+        )
+        pipeline = Pipeline(
+            ExampleTask, config=config, server_config=porch_server_config
         )
 
-        assert p.register() == p
+        assert pipeline.register() == pipeline
 
     @m.context("When a pipline is registered and config update is requested")
     @m.it("Updates the config with a new pipeline token")
     def test_register_pipeline_new_token(self, porch_server_config):
-        tmp_config = replace(porch_server_config)
-        assert tmp_config.pipeline_token is None
+        tmp_server_config = replace(porch_server_config)
+        assert tmp_server_config.pipeline_token is None
 
-        p = Pipeline(
-            ExampleTask,
+        config = Pipeline.Config(
             name="test_register_pipeline_new_token",
             uri="http://www.sanger.ac.uk",
             version=version(),
-            config=tmp_config,
         )
-        p = p.register(update_config=True)
+        pipeline = Pipeline(ExampleTask, config=config, server_config=tmp_server_config)
+        pipeline = pipeline.register(update_config=True)
 
-        assert p.config.pipeline_token is not None
+        assert pipeline.server_config.pipeline_token is not None
 
     @m.context("After a pipeline is registered")
     @m.it("Can create a new token")
     def test_new_token(self, porch_server_config):
-        p = Pipeline(
-            ExampleTask,
+        config = Pipeline.Config(
             name="test_new_token",
             uri="http://www.sanger.ac.uk",
             version=version(),
-            config=porch_server_config,
         )
-        p = p.register()
 
-        t = p.new_token("test_new_token")
+        pipeline = Pipeline(
+            ExampleTask, config=config, server_config=porch_server_config
+        )
+        pipeline = pipeline.register()
+
+        t = pipeline.new_token("test_new_token")
         assert t is not None
 
     @m.context("After a pipeline is registered")
     @m.it("Can have tasks added to it")
     def test_add_task(self, porch_server_config):
-        p = Pipeline(
-            ExampleTask,
+        config = Pipeline.Config(
             name="test_add_task",
             uri="http://www.sanger.ac.uk",
             version=version(),
-            config=porch_server_config,
         )
-        p = p.register()
 
-        token = p.new_token("test_add_task")
+        pipeline = Pipeline(
+            ExampleTask, config=config, server_config=porch_server_config
+        )
+        pipeline = pipeline.register()
+
+        token = pipeline.new_token("test_add_task")
         porch_server_config.pipeline_token = token
 
         task1 = ExampleTask(item="bread", quantity=2, price=Decimal("4.20"))
-        assert p.add(task1)  # True because task is not present
-        assert task1 in p.all()
+        assert pipeline.add(task1)  # True because task is not present
+        assert task1 in pipeline.all()
 
         task2 = ExampleTask(item="sugar", quantity=2, price=Decimal("0.78"))
-        assert p.add(task2)
-        assert task2 in p.all()
+        assert pipeline.add(task2)
+        assert task2 in pipeline.all()
 
-        assert not p.add(task1)  # False because task is already present
+        assert not pipeline.add(task1)  # False because task is already present
 
     @m.context("When identical tasks are submitted to different pipeline versions")
     @m.it("Creates a separate task for each version and rejects duplicates within it")
     def test_add_task_different_pipeline_versions(self, porch_server_config):
         name = f"test-task-versions-{uuid4().hex}"
+
         pipelines = [
             Pipeline(
                 ExampleTask,
-                name=name,
-                uri="http://www.sanger.ac.uk",
-                version=pipeline_version,
-                config=porch_server_config,
+                config=Pipeline.Config(
+                    name=name,
+                    uri="http://www.sanger.ac.uk",
+                    version=pipeline_version,
+                ),
+                server_config=porch_server_config,
             ).register(update_config=True)
             for pipeline_version in ("1.0.0", "2.0.0")
         ]
@@ -339,37 +354,41 @@ class TestPorchPipeline:
     @m.context("After a task has been added to a pipeline")
     @m.it("Can be claimed")
     def test_claim_task(self, porch_server_config):
-        p = Pipeline(
-            ExampleTask,
+        config = Pipeline.Config(
             name="test_claim_task",
             uri="http://www.sanger.ac.uk",
             version=version(),
-            config=porch_server_config,
         )
-        p = p.register()
 
-        token = p.new_token("test_claim_task")
+        pipeline = Pipeline(
+            ExampleTask, config=config, server_config=porch_server_config
+        )
+        pipeline = pipeline.register()
+
+        token = pipeline.new_token("test_claim_task")
         porch_server_config.pipeline_token = token
 
         task = ExampleTask(item="bread", quantity=2, price=Decimal("4.20"))
-        p.add(task)
+        pipeline.add(task)
 
-        assert task in p.all()
-        assert task in p.claim(1000)
+        assert task in pipeline.all()
+        assert task in pipeline.claim(1000)
 
     @m.context("After a task has been claimed")
     @m.it("Can be updated")
     def test_update_task(self, porch_server_config):
-        p = Pipeline(
-            ExampleTask,
+        config = Pipeline.Config(
             name="test_update_task",
             uri="http://www.sanger.ac.uk",
             version=version(),
-            config=porch_server_config,
         )
-        p = p.register()
 
-        token = p.new_token("test_update_task")
+        pipeline = Pipeline(
+            ExampleTask, config=config, server_config=porch_server_config
+        )
+        pipeline = pipeline.register()
+
+        token = pipeline.new_token("test_update_task")
         porch_server_config.pipeline_token = token
 
         tasks = [
@@ -378,36 +397,36 @@ class TestPorchPipeline:
         ]
 
         for task in tasks:
-            assert p.add(task)
+            assert pipeline.add(task)
 
-        claimed = p.claim(1000)
+        claimed = pipeline.claim(1000)
 
         for task in tasks:
-            assert task in p.all()
+            assert task in pipeline.all()
             assert task in claimed
 
         for task in tasks:
             if task.quantity % 2 == 0:
-                assert p.run(task)
-                assert task in p.running()
+                assert pipeline.run(task)
+                assert task in pipeline.running()
 
                 if task.quantity == 4:
-                    assert p.fail(task)
-                    assert task in p.failed()
+                    assert pipeline.fail(task)
+                    assert task in pipeline.failed()
 
         for task in tasks:
             if task.quantity % 2 == 1:
-                assert p.run(task)
-                assert task in p.running()
+                assert pipeline.run(task)
+                assert task in pipeline.running()
 
-                assert p.fail(task)
-                assert task in p.failed()
+                assert pipeline.fail(task)
+                assert task in pipeline.failed()
 
-                assert p.retry(task)
-                assert task in p.pending()
+                assert pipeline.retry(task)
+                assert task in pipeline.pending()
 
-                assert p.run(task)
-                assert task in p.running()
+                assert pipeline.run(task)
+                assert task in pipeline.running()
 
-                assert p.done(task)
-                assert task in p.succeeded()
+                assert pipeline.done(task)
+                assert task in pipeline.succeeded()

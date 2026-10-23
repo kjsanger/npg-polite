@@ -18,6 +18,7 @@
 
 import socket
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from textwrap import dedent
@@ -29,7 +30,7 @@ from npg.conf import IniData
 from requests import HTTPError
 
 from npg_polite.porch import Pipeline
-from npg_polite.task import ShellCommandTask
+from npg_polite.task import DatetimeParam, IntervalBounds, ShellCommandTask
 
 TEST_CONFIG_FILE = Path("./tests/polite_config.ini")
 
@@ -50,6 +51,11 @@ def porch_server_available() -> bool:
         raise
 
 
+@pytest.fixture(scope="session")
+def cli_wrapper_path() -> Path:
+    return Path(__file__).resolve().parent / "bin"
+
+
 @pytest.fixture(scope="function")
 def porch_server_config() -> Pipeline.ServerConfig:
     return IniData(Pipeline.ServerConfig).from_file(
@@ -59,13 +65,24 @@ def porch_server_config() -> Pipeline.ServerConfig:
 
 @pytest.fixture
 def pipeline(porch_server_config) -> Pipeline[ShellCommandTask]:
-    return Pipeline(
-        ShellCommandTask,
+    config = Pipeline.Config(
         name=f"shell-task-test-{uuid4().hex}",
         uri="https://example.com/shell-task-tests",
         version="1.0.0",
-        config=porch_server_config,
+    )
+
+    return Pipeline(
+        ShellCommandTask, config=config, server_config=porch_server_config
     ).register(update_config=True)
+
+
+@pytest.fixture
+def interval_bounds() -> IntervalBounds:
+    """Provide named UTC bounds spanning three hours for interval tasks."""
+    return (
+        DatetimeParam("start", datetime(2026, 1, 21, tzinfo=UTC)),
+        DatetimeParam("stop", datetime(2026, 1, 21, 3, tzinfo=UTC)),
+    )
 
 
 @pytest.fixture
