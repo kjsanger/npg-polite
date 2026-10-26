@@ -15,7 +15,6 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-
 import json
 import operator
 import subprocess
@@ -78,30 +77,32 @@ class TestShellCommandTask:
     @m.context("When task input is invalid")
     @m.it("Rejects it before execution or submission")
     @m.parametrize(
-        "command, params, error",
+        "command, params",
         [
-            (None, {}, TypeError),
-            ("true\0", {}, ValueError),
-            ("true", {"bad-name": "value"}, ValueError),
-            ("true", {"1name": "value"}, ValueError),
-            ("true", {"": "value"}, ValueError),
-            ("true", {1: "value"}, ValueError),
-            ("true", {"name": 1}, ValueError),
-            ("true", {"name": "bad\0value"}, ValueError),
+            (None, {}),
+            (42, {}),
+            (b"true", {}),
+            ("true\0", {}),
+            ("true", {"bad-name": "value"}),
+            ("true", {"1name": "value"}),
+            ("true", {"": "value"}),
+            ("true", {1: "value"}),
+            ("true", {"name": 1}),
+            ("true", {"name": "bad\0value"}),
         ],
     )
-    def test_invalid_input(self, command, params, error):
-        with raises(error):
+    def test_invalid_input(self, command, params):
+        with raises(ValueError):
             ShellCommandTask(command, params)
 
     @m.context("When rendering repeated and escaped placeholders")
     @m.it("Quotes values once and preserves the serialized template")
     def test_render(self):
-        command = "printf '%s' {:value:} {:value:} '{{:missing:}}'"
+        command = "printf '%s' {:value:} {:value:} '{{:literal_value:}}'"
         task = ShellCommandTask(command, {"value": "a b", "unused": "allowed"})
         original = task.to_serializable()
 
-        assert task.render_command() == "printf '%s' 'a b' 'a b' '{:missing:}'"
+        assert task.render_command() == "printf '%s' 'a b' 'a b' '{:literal_value:}'"
         assert task.to_serializable() == original
         assert task.command == command
 
@@ -271,9 +272,11 @@ class TestShellCommandPorch:
     @m.it("Creates only missing tasks and prevents concurrent duplicate claims")
     def test_overlapping_periods(
         self,
-        pipeline: Pipeline[ShellCommandTask],
+        registered_shellcmd_pipeline: Pipeline[ShellCommandTask],
         utc_period_tasks: list[ShellCommandTask],
     ):
+        pipeline = registered_shellcmd_pipeline
+
         assert [pipeline.add(task) for task in utc_period_tasks[:3]] == [
             True,
             True,
@@ -310,10 +313,11 @@ class TestShellCommandPorch:
     @m.it("Preserves the original period and executes after an explicit retry")
     def test_retry(
         self,
-        pipeline: Pipeline[ShellCommandTask],
+        registered_shellcmd_pipeline: Pipeline[ShellCommandTask],
         utc_period_tasks: list[ShellCommandTask],
         tmp_path,
     ):
+        pipeline = registered_shellcmd_pipeline
         ready = tmp_path / "ready"
         output = tmp_path / "output"
 
@@ -349,6 +353,58 @@ class TestShellCommandPorch:
 
 @m.describe("Interval task creation")
 class TestIntervalTasks:
+    @m.context("When the interval is zero or negative")
+    @m.it("Rejects the interval even for an empty time range")
+    @m.parametrize("seconds", [0, -1])
+    @m.parametrize("empty", [False, True])
+    def test_nonpositive_interval(self, interval_bounds, seconds, empty):
+        begin, end = interval_bounds
+        if empty:
+            end = DatetimeParam(end.name, begin.datetime)
+        with raises(ValueError, match="interval must be positive"):
+            make_interval_tasks(
+                "echo {:start:}", begin, end, timedelta(seconds=seconds), None
+            )
+
+    @m.context("When both boundaries have the same parameter name")
+    @m.it("Rejects the clash even for an empty time range")
+    @m.parametrize("empty", [False, True])
+    def test_identical_boundary_names(self, interval_bounds, empty):
+        begin, end = interval_bounds
+        end = DatetimeParam(begin.name, begin.datetime if empty else end.datetime)
+        with raises(ValueError, match="names must be distinct"):
+            make_interval_tasks("echo {:start:}", begin, end, timedelta(hours=1), None)
+
+    @m.context("When the overall time range is reversed")
+    @m.it("Rejects the range")
+    def test_reversed_range(self, interval_bounds):
+        begin, end = interval_bounds
+        with raises(ValueError, match="earlier than begin"):
+            make_interval_tasks("echo", end, begin, timedelta(hours=1), None)
+
+    @m.context("When the overall time range is empty")
+    @m.it("Returns no tasks without validating an unused template")
+    def test_empty_range(self, interval_bounds):
+        begin, end = interval_bounds
+        end = DatetimeParam(end.name, begin.datetime)
+        assert (
+            make_interval_tasks(
+                "echo {:missing:}", begin, end, timedelta(hours=1), None
+            )
+            == []
+        )
+
+    @m.context("When shared parameters clash with boundaries of an empty range")
+    @m.it("Rejects the clash before creating tasks")
+    @m.parametrize("name", ["start", "stop"])
+    def test_shared_parameter_clash_empty_range(self, interval_bounds, name):
+        begin, end = interval_bounds
+        end = DatetimeParam(end.name, begin.datetime)
+        with raises(ValueError, match=f"Name clash between '{name}'"):
+            make_interval_tasks(
+                "echo", begin, end, timedelta(hours=1), {name: "replacement"}
+            )
+
     @m.context("When the interval fits exactly within the overall time span")
     @m.it("Creates the expected number of complete interval tasks")
     @m.parametrize("hours, boundaries", [(1, [0, 1, 2, 3]), (3, [0, 3])])

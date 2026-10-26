@@ -19,15 +19,22 @@
 import os
 from dataclasses import replace
 from decimal import Decimal
-from typing import Any
+from typing import Any, assert_type
+from unittest.mock import patch
 from uuid import uuid4
 
-from npg.conf import IniData
 from pytest import mark as m, raises
 
-from conftest import TEST_CONFIG_FILE, TEST_CONFIG_SECTION, porch_server_available
-from npg_polite import version
-from npg_polite.porch import CompatibilityPolicy, Pipeline, PoliteVersionError, Task
+from conftest import EXAMPLE_PIPELINE_CONFIG_FILE, porch_server_available
+from npg_polite.porch import (
+    CompatibilityPolicy,
+    Pipeline,
+    PoliteVersionError,
+    Task,
+    TaskNotFoundError,
+    load_pipeline_config,
+)
+from npg_polite.task import ShellCommandTask
 
 
 class ExampleTask(Task):
@@ -129,6 +136,72 @@ class TestPorchTask:
             hash(task)
 
 
+@m.describe("Pipeline task configuration")
+class TestPipelineTaskConfiguration:
+    @m.context("When configuration names a task subclass")
+    @m.it("Resolves the class and uses it for the pipeline")
+    def test_resolve_task_class(self, shellcmd_pipeline_config_file):
+        config = load_pipeline_config(shellcmd_pipeline_config_file)
+
+        resolved = config.resolve_task_class()
+        assert_type(resolved, type[Task])
+        assert resolved is ShellCommandTask
+
+        pipeline = Pipeline(config=config)
+        assert_type(pipeline, Pipeline[Task])
+        assert pipeline.cls is ShellCommandTask
+
+    @m.context("When configuration does not name an importable task subclass")
+    @m.it("Rejects it during configuration validation")
+    @m.parametrize(
+        "name, error, message",
+        [
+            ("ShellCommandTask", TaskNotFoundError, "Invalid task name"),
+            ("npg_polite.task.MissingTask", TaskNotFoundError, "not found"),
+            ("builtins.str", TaskNotFoundError, "not found"),
+            (
+                "npg_polite._missing_task_module.Task",
+                ModuleNotFoundError,
+                "No module named",
+            ),
+        ],
+        ids=["unqualified", "missing-class", "non-task", "missing-module"],
+    )
+    def test_invalid_task_class(
+        self, shellcmd_pipeline_config_file, name, error, message
+    ):
+        config = load_pipeline_config(shellcmd_pipeline_config_file)
+        with raises(error, match=message):
+            replace(config, task=name)
+
+    @m.context("When the configured task name is changed after validation")
+    @m.it("Validates the updated name when constructing a pipeline")
+    def test_changed_task(self, shellcmd_pipeline_config_file):
+        config = load_pipeline_config(shellcmd_pipeline_config_file)
+
+        config.task = "tests.test_porch.SomeUnknownTask"
+        with raises(TaskNotFoundError, match="not found"):
+            Pipeline(config=config)
+
+    @m.context("When a specialised pipeline receives serialised tasks")
+    @m.it("Returns instances of the configured subclass with its static type")
+    def test_deserialise_tasks(
+        self, registered_shellcmd_pipeline: Pipeline[ShellCommandTask]
+    ):
+        pipeline: Pipeline[ShellCommandTask] = registered_shellcmd_pipeline
+        assert_type(pipeline.cls, type[ShellCommandTask])
+        assert pipeline.cls is ShellCommandTask
+
+        task = ShellCommandTask("echo {:message:}", {"message": "hello"})
+        pipeline.add(task)
+
+        tasks = pipeline.all()
+        assert_type(tasks, list[ShellCommandTask])
+        assert tasks == [task]
+        assert isinstance(tasks[0], ShellCommandTask)
+        assert tasks[0].status == Task.Status.PENDING
+
+
 @m.describe("Pipeline compatibility policies")
 class TestCompatibilityPolicy:
     @m.context("When a compatibility policy is applied")
@@ -150,15 +223,13 @@ class TestCompatibilityPolicy:
             name="compatibility-test",
             uri="https://example.com/pipeline",
             version="1.2.3",
-            compat_policy=policy,
-            compat_version=custom,
+            task="tests.test_porch.ExampleTask",
+            compatibility_policy=policy,
+            compatibility_version=custom,
+            server_url="http://localhost/",
         )
 
-        pipeline = Pipeline(
-            ExampleTask,
-            config=config,
-            server_config=Pipeline.ServerConfig(url="http://localhost"),
-        )
+        pipeline = Pipeline[ExampleTask](config=config)
         task = ExampleTask(item="bread")
 
         assert pipeline.compatible_version() == expected
@@ -173,15 +244,13 @@ class TestCompatibilityPolicy:
             name="compatibility-test",
             uri="https://example.com/pipeline",
             version="1.2.3",
+            task="tests.test_porch.ExampleTask",
+            server_url="http://localhost/",
         )
 
-        pipeline = Pipeline(
-            ExampleTask,
-            config=config,
-            server_config=Pipeline.ServerConfig(url="http://localhost"),
-        )
+        pipeline = Pipeline[ExampleTask](config=config)
 
-        assert pipeline.compat_policy is CompatibilityPolicy.EXACT
+        assert pipeline.compatibility_policy is CompatibilityPolicy.EXACT
         assert pipeline.compatible_version() == "1.2.3"
 
     @m.context("When an exact or custom policy receives a non-semantic version")
@@ -219,95 +288,62 @@ class TestCompatibilityPolicy:
 class TestPorchPipeline:
     @m.context("When configured from an INI file")
     @m.it("Loads the configuration")
-    def test_configure(self):
-        config = IniData(Pipeline.ServerConfig).from_file(
-            TEST_CONFIG_FILE, TEST_CONFIG_SECTION
-        )
+    def test_configure(self, example_pipeline_config):
+        config = example_pipeline_config
 
         assert config is not None
+        assert config.name.startswith("example-")
+        assert config.uri == "https://example.com/test_pipeline"
+        assert config.version == "1.0.1"
+        assert config.compatibility_policy == CompatibilityPolicy.MAJOR_MINOR
+        assert config.compatibility_version is None
+
         assert config.admin_token == "0" * 32
         assert config.pipeline_token is None
-        assert config.url is not None
+        assert config.server_url is not None
 
     @m.context("When configured from both an INI file and environment variables")
     @m.it("Loads the configuration and falls back to environment variables")
     def test_configure_env(self):
-        env_prefix = "PORCH_"
         pipeline_token = "1" * 32
-        os.environ[env_prefix + "PIPELINE_TOKEN"] = pipeline_token
+        with patch.dict(os.environ, {"PORCH_PIPELINE_TOKEN": pipeline_token}):
+            config = load_pipeline_config(EXAMPLE_PIPELINE_CONFIG_FILE)
 
-        config: Pipeline.ServerConfig = IniData(
-            Pipeline.ServerConfig, use_env=True, env_prefix=env_prefix
-        ).from_file(TEST_CONFIG_FILE, TEST_CONFIG_SECTION)
-
-        assert config is not None
-        assert config.admin_token == "0" * 32
-        assert config.pipeline_token == pipeline_token
-        assert config.url is not None
+            assert config is not None
+            assert config.admin_token == "0" * 32
+            assert config.pipeline_token == pipeline_token
+            assert config.server_url is not None
 
     @m.context("When a pipeline has been defined")
     @m.it("Can be registered")
-    def test_register_pipeline(self, porch_server_config):
-        config = Pipeline.Config(
-            name="test_register_pipeline",
-            uri="http://www.sanger.ac.uk",
-            version=version(),
-        )
-        pipeline = Pipeline(
-            ExampleTask, config=config, server_config=porch_server_config
-        )
-
+    def test_register_pipeline(self, example_pipeline_config):
+        pipeline = Pipeline[ExampleTask](config=example_pipeline_config)
         assert pipeline.register() == pipeline
 
     @m.context("When a pipline is registered and config update is requested")
     @m.it("Updates the config with a new pipeline token")
-    def test_register_pipeline_new_token(self, porch_server_config):
-        tmp_server_config = replace(porch_server_config)
-        assert tmp_server_config.pipeline_token is None
+    def test_register_pipeline_new_token(self, example_pipeline_config):
+        assert example_pipeline_config.pipeline_token is None
 
-        config = Pipeline.Config(
-            name="test_register_pipeline_new_token",
-            uri="http://www.sanger.ac.uk",
-            version=version(),
-        )
-        pipeline = Pipeline(ExampleTask, config=config, server_config=tmp_server_config)
+        pipeline = Pipeline[ExampleTask](config=example_pipeline_config)
         pipeline = pipeline.register(update_config=True)
-
-        assert pipeline.server_config.pipeline_token is not None
+        assert pipeline.config.pipeline_token is not None
 
     @m.context("After a pipeline is registered")
     @m.it("Can create a new token")
-    def test_new_token(self, porch_server_config):
-        config = Pipeline.Config(
-            name="test_new_token",
-            uri="http://www.sanger.ac.uk",
-            version=version(),
-        )
-
-        pipeline = Pipeline(
-            ExampleTask, config=config, server_config=porch_server_config
-        )
+    def test_new_token(self, example_pipeline_config):
+        pipeline = Pipeline[ExampleTask](config=example_pipeline_config)
         pipeline = pipeline.register()
-
-        t = pipeline.new_token("test_new_token")
-        assert t is not None
+        assert pipeline.new_token("test_new_token") is not None
 
     @m.context("After a pipeline is registered")
     @m.it("Can have tasks added to it")
-    def test_add_task(self, porch_server_config):
-        config = Pipeline.Config(
-            name="test_add_task",
-            uri="http://www.sanger.ac.uk",
-            version=version(),
-        )
-
-        pipeline = Pipeline(
-            ExampleTask, config=config, server_config=porch_server_config
-        )
+    def test_add_task(self, example_pipeline_config):
+        pipeline = Pipeline[ExampleTask](config=example_pipeline_config)
         pipeline = pipeline.register()
 
         token = pipeline.new_token("test_add_task")
-        porch_server_config.pipeline_token = token
+        example_pipeline_config.pipeline_token = token
 
         task1 = ExampleTask(item="bread", quantity=2, price=Decimal("4.20"))
         assert pipeline.add(task1)  # True because task is not present
@@ -321,21 +357,18 @@ class TestPorchPipeline:
 
     @m.context("When identical tasks are submitted to different pipeline versions")
     @m.it("Creates a separate task for each version and rejects duplicates within it")
-    def test_add_task_different_pipeline_versions(self, porch_server_config):
+    def test_add_task_different_pipeline_versions(self, example_pipeline_config):
         name = f"test-task-versions-{uuid4().hex}"
 
-        pipelines = [
-            Pipeline(
-                ExampleTask,
-                config=Pipeline.Config(
-                    name=name,
-                    uri="http://www.sanger.ac.uk",
-                    version=pipeline_version,
-                ),
-                server_config=porch_server_config,
-            ).register(update_config=True)
-            for pipeline_version in ("1.0.0", "2.0.0")
-        ]
+        pipelines = []
+        for pipeline_version in ["1.0.0", "2.0.0"]:
+            config = replace(
+                example_pipeline_config, name=name, version=pipeline_version
+            )
+            pipeline = Pipeline[ExampleTask](config=config)
+            pipeline.register(update_config=True)
+            pipelines.append(pipeline)
+
         task = ExampleTask(item="bread", quantity=2, price=Decimal("4.20"))
 
         for pipeline in pipelines:
@@ -353,20 +386,12 @@ class TestPorchPipeline:
 
     @m.context("After a task has been added to a pipeline")
     @m.it("Can be claimed")
-    def test_claim_task(self, porch_server_config):
-        config = Pipeline.Config(
-            name="test_claim_task",
-            uri="http://www.sanger.ac.uk",
-            version=version(),
-        )
-
-        pipeline = Pipeline(
-            ExampleTask, config=config, server_config=porch_server_config
-        )
+    def test_claim_task(self, example_pipeline_config):
+        pipeline = Pipeline[ExampleTask](config=example_pipeline_config)
         pipeline = pipeline.register()
 
         token = pipeline.new_token("test_claim_task")
-        porch_server_config.pipeline_token = token
+        example_pipeline_config.pipeline_token = token
 
         task = ExampleTask(item="bread", quantity=2, price=Decimal("4.20"))
         pipeline.add(task)
@@ -376,20 +401,12 @@ class TestPorchPipeline:
 
     @m.context("After a task has been claimed")
     @m.it("Can be updated")
-    def test_update_task(self, porch_server_config):
-        config = Pipeline.Config(
-            name="test_update_task",
-            uri="http://www.sanger.ac.uk",
-            version=version(),
-        )
-
-        pipeline = Pipeline(
-            ExampleTask, config=config, server_config=porch_server_config
-        )
+    def test_update_task(self, example_pipeline_config):
+        pipeline = Pipeline[ExampleTask](config=example_pipeline_config)
         pipeline = pipeline.register()
 
         token = pipeline.new_token("test_update_task")
-        porch_server_config.pipeline_token = token
+        example_pipeline_config.pipeline_token = token
 
         tasks = [
             ExampleTask(item="bread", quantity=i, price=Decimal(str(i * 10)))

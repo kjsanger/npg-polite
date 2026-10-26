@@ -16,14 +16,18 @@
 #
 
 import http
+import inspect
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
+from importlib import import_module
+from pathlib import Path
 from typing import Any, Self, cast
 from urllib.parse import urljoin
 
 import requests
+from npg.conf import ConfigParser, IniData
 from requests import Response
 from structlog import get_logger
 
@@ -36,6 +40,10 @@ def logger():
 hides the details sending requests to and receiving responses from the Porch server.
 For a request/response-centric API, see https://github.com/wtsi-npg/npg_porch_cli
 """
+
+
+CONFIG_SERVER_SECTION = "PORCH"
+CONFIG_PIPELINE_SECTION = "PIPELINE"
 
 
 class PoliteError(Exception):
@@ -212,13 +220,13 @@ class Pipeline[T: Task = Task]:
     to ensure that each task is created and processed once.
 
     To use this module for a new pipeline, you need to create a subclass of
-    `Pipeline.Task` and implement the `to_serializable` and `from_serializable`
+    `Task` and implement the `to_serializable` and `from_serializable`
     methods. See the Porch documentation for more information on how the task
     attributes and values are serialized as JSON.
 
     For example:
 
-        from porch import Pipeline
+        from npg_polite.porch import Pipeline, Task
 
         class SumTask(Task):
             input1: int
@@ -235,13 +243,20 @@ class Pipeline[T: Task = Task]:
                     "input2": self.input2,
                 }
 
+            @classmethod
             def from_serializable(cls, serializable: dict):
                 return cls(**serializable)
 
     When this is done, you can create a new pipeline and add tasks to it:
 
-        p = Pipeline("Sum of two integers", "http://localhost/sum", "1.0.0")
-        p = p.register()  # Needs to be done once
+        config = Pipeline.Config(
+            name="Sum of two integers",
+            uri="http://localhost/sum",
+            version="1.0.0",
+            task=f"{SumTask.__module__}.{SumTask.__qualname__}",
+        )
+        p = Pipeline[SumTask](config=config, server_config=server_config)
+        p = p.register(update_config=True)  # Needs to be done once
 
         tasks = [
             SumTask(10, 42),
@@ -269,93 +284,100 @@ class Pipeline[T: Task = Task]:
     """
 
     @dataclass(slots=True)
-    class ServerConfig:
-        """Configuration for a Porch pipeline server.
+    class Config:
+        """Configuration for a Porch pipeline.
 
         This exists to collect external configuration for a pipeline in one place
         where it can be passed to the pipeline constructor.
 
         A configuration instance can be created directly and populated with tokens
-        obtained from a secrets manager. E.g.
-
-            server_config = ServerConfig(
-                url="https://example.com/porch",
-                admin_token=token1,
-                pipeline_token=token2,
-            )
-
-        Alternatively, configuration (and possibly tokens) can be read from a file.
+        obtained from a secrets manager. Alternatively, configuration (and possibly
+        tokens) can be read from a file.
 
         The token fields are set to not be included in the repr() output to avoid
         leaking sensitive information in logs.
-        """
-
-        url: str
-        """The base URL of the Porch server."""
-
-        pipeline_token: str | None = field(repr=False, default=None)
-        admin_token: str | None = field(repr=False, default=None)
-
-    @dataclass(frozen=True, slots=True)
-    class Config:
-        """Configuration for a Porch pipeline.
 
         Attributes:
-           name: The pipeline name.
-           uri: The pipeline URI.
-           version: The pipeline version.
-           compat_policy: The compatibility policy between different versions of the
-               pipeline. Defaults to being EXACT i.e. any change to the pipeline's
-               version will be exposed to the server.
-           compat_version: An custom compatibility version to be used with the
+            name: The pipeline name.
+            uri: The pipeline URI.
+            version: The pipeline version.
+            task: The fully qualified class name of the pipeline's tasks.
+            server_url: The base URL of the Porch server.
+            admin_token: The pipeline admin token, if any.
+            pipeline_token: The pipeline auth token.
+            compatibility_policy: The compatibility policy between different versions of the
+                pipeline. Defaults to being EXACT i.e. any change to the pipeline's
+                version will be exposed to the server.
+            compatibility_version: An custom compatibility version to be used with the
                CUSTOM compatibility policy. Defaults to None.
         """
 
         name: str
         uri: str
         version: str
-        compat_policy: CompatibilityPolicy = CompatibilityPolicy.EXACT
-        compat_version: str | None = None
+        task: str
+
+        server_url: str
+        admin_token: str | None = field(repr=False, default=None)
+        pipeline_token: str | None = field(repr=False, default=None)
+        compatibility_policy: str | None = None
+        compatibility_version: str | None = None
+
+        def __post_init__(self):
+            if self.compatibility_policy is None:
+                self.compatibility_policy = CompatibilityPolicy.EXACT
+            else:
+                self.compatibility_policy = CompatibilityPolicy(
+                    self.compatibility_policy
+                )
+
+            self.resolve_task_class()
+
+        def resolve_task_class(self) -> type[Task]:
+            """Resolve the configured task class by its fully qualified name.
+
+            Returns:
+                The resolved task class.
+
+            Raises:
+                TaskNotFoundError: If the name is not in module.class format or
+                    does not identify a Task subclass in the module.
+                ModuleNotFoundError: If the task module cannot be imported.
+            """
+            name = self.task
+            parts = name.rsplit(".", 1)
+            if len(parts) == 1:
+                raise TaskNotFoundError(
+                    f"Invalid task name '{name}'; expected a `<module name>.<class name>` string"
+                )
+
+            module_name, class_name = parts
+            logger().debug(f"Resolving task '{name}' in module '{module_name}'")
+
+            module = import_module(module_name)
+            for member_name, obj in inspect.getmembers(module, inspect.isclass):
+                if member_name == class_name and issubclass(obj, Task):
+                    return obj
+
+            raise TaskNotFoundError(f"Task '{name}' not found")
 
     config: Config
-    server_config: ServerConfig
 
     timeout: float | int
 
-    def __init__(self, cls: type[T], config: Config, server_config: ServerConfig):
-        """Create a new pipeline with no pipeline access token set.
+    def __init__(self, config: Config):
+        """Create a pipeline using the task class named in its configuration.
+
+        The generic task type must match config.task. This relationship cannot be
+        checked statically or enforced by the cast below. Use Pipeline[SomeTask]
+        for subclass-specific typing; an unspecialised Pipeline defaults to Task.
 
         Args:
-            cls: The task class for this pipeline. Must be a subclass of Task.
             config: The configuration for the pipeline.
-            server_config: The configuration for the pipeline server.
         """
-
-        # Note that the task class is passed explicitly to the constructor because
-        # it's not reliable (Python 3.12) to get the class parameter for a generic
-        # type at runtime (using documented API) when using e.g.
-        #
-        #     p = Pipeline[ExampleTask](...)
-        #
-        # If Pipeline is subclassed e.g.
-        #
-        #     class FooPipeline(Pipeline[ExampleTask]):
-        #         pass
-        #
-        #  p = FooPipeline(...)
-        #
-        # One can use:
-        #
-        #     cls = get_args(self.__orig_bases__[0])[0]
-        #
-        # However, I've not been able to get this to work without requiring a
-        # subclass and that puts a burden on the user of the API to jump through
-        # language hoops to get something that works.
-
-        self.cls = cls
         self.config = config
-        self.server_config = server_config
-
+        # Callers are responsible for matching T to the configured task class.
+        self.cls: type[T] = cast(type[T], config.resolve_task_class())
         self.timeout = 10
 
     @property
@@ -374,18 +396,20 @@ class Pipeline[T: Task = Task]:
         return self.config.version
 
     @property
-    def compat_policy(self) -> CompatibilityPolicy:
+    def compatibility_policy(self) -> CompatibilityPolicy:
         """Return the pipeline compatibility policy defined its config."""
-        return self.config.compat_policy
+        return CompatibilityPolicy(self.config.compatibility_policy)
 
     @property
-    def compat_version(self) -> str | None:
+    def compatibility_version(self) -> str | None:
         """Return the pipeline compatibility version defined its config."""
-        return self.config.compat_version
+        return self.config.compatibility_version
 
     def compatible_version(self) -> str:
         """Return a compatible pipeline version according to its compatibility policy."""
-        return self.compat_policy.compatible_version(self.version, self.compat_version)
+        return self.compatibility_policy.compatible_version(
+            self.version, self.compatibility_version
+        )
 
     def register(self, update_config: bool = False) -> Self:
         """Register the pipeline with a Porch server.
@@ -403,14 +427,14 @@ class Pipeline[T: Task = Task]:
         Returns:
             The pipeline object.
         """
-        if self.server_config.admin_token is None:
+        if self.config.admin_token is None:
             raise PolitePrivilegeError(
                 "Cannot register pipelines; no admin token is set"
             )
 
         body = self._to_serializable()
 
-        create_headers = self._headers(self.server_config.admin_token)
+        create_headers = self._headers(self.config.admin_token)
         create_response = self._request(
             "POST", self._pipeline_endpoint(), headers=create_headers, body=body
         )
@@ -423,16 +447,16 @@ class Pipeline[T: Task = Task]:
         # token, unlike the other attributes. Instead, it requires a pipeline token,
         # which may not exist yet. If we haven't been provided one in the config, we
         # have to assume that there isn't one available yet and create a new one.
-        if self.server_config.pipeline_token is None:
+        if self.config.pipeline_token is None:
             pipeline_token = self.new_token(token_desc="pipeline creation event")
             if update_config:
-                self.server_config.pipeline_token = pipeline_token
+                self.config.pipeline_token = pipeline_token
                 logger().info(
                     "Updated the in-memory config with a new pipeline token",
                     pipeline=self,
                 )
         else:
-            pipeline_token = self.server_config.pipeline_token
+            pipeline_token = self.config.pipeline_token
             logger().debug(f"Using the pipeline token from config", pipeline=self)
 
         version_headers = self._headers(pipeline_token)
@@ -465,13 +489,13 @@ class Pipeline[T: Task = Task]:
         Returns:
             The token string.
         """
-        if self.server_config.admin_token is None:
+        if self.config.admin_token is None:
             raise PolitePrivilegeError(
                 "Cannot create a new pipeline token; no admin token is set"
             )
 
         url = urljoin(self._pipeline_endpoint(), f"{self.name}/token/{token_desc}")
-        headers = self._headers(self.server_config.admin_token)
+        headers = self._headers(self.config.admin_token)
 
         response = self._request("POST", url, headers=headers)
         response.raise_for_status()
@@ -489,13 +513,13 @@ class Pipeline[T: Task = Task]:
         Returns:
             True if the task was added, False if it already exists.
         """
-        if self.server_config.pipeline_token is None:
+        if self.config.pipeline_token is None:
             raise PolitePrivilegeError(
                 "Cannot add a new task; no pipeline token is set"
             )
 
         url = self._task_endpoint()
-        headers = self._headers(self.server_config.pipeline_token)
+        headers = self._headers(self.config.pipeline_token)
         body = self._to_serializable(task)
 
         response = self._request("POST", url, headers=headers, body=body)
@@ -541,12 +565,12 @@ class Pipeline[T: Task = Task]:
         Returns:
             The claimed tasks.
         """
-        if self.server_config.pipeline_token is None:
+        if self.config.pipeline_token is None:
             raise PolitePrivilegeError("Cannot claim a task; no pipeline token is set")
 
         logger().info("Task claim", num=num)
         url = self._task_endpoint() + f"claim/?num_tasks={num}"
-        headers = self._headers(self.server_config.pipeline_token)
+        headers = self._headers(self.config.pipeline_token)
         body = self._to_serializable()
 
         response = self._request("POST", url, headers=headers, body=body)
@@ -591,13 +615,13 @@ class Pipeline[T: Task = Task]:
 
     def _get_tasks(self, status: Task.Status | None = None) -> list[T]:
         """Get all tasks for this pipeline with an optional status filter."""
-        if self.server_config.pipeline_token is None:
+        if self.config.pipeline_token is None:
             raise PolitePrivilegeError("Cannot get tasks; no pipeline token is set")
 
         url = self._task_endpoint() + f"?pipeline_name={self.name}"
         if status is not None:
             url += f"&status={status.value}"
-        headers = self._headers(self.server_config.pipeline_token)
+        headers = self._headers(self.config.pipeline_token)
 
         response = self._request("GET", url, headers=headers)
         response.raise_for_status()
@@ -606,11 +630,11 @@ class Pipeline[T: Task = Task]:
 
     def _update_task(self, task: T) -> T:
         """Update the status of a task and return it."""
-        if self.server_config.pipeline_token is None:
+        if self.config.pipeline_token is None:
             raise PolitePrivilegeError("Cannot update tasks; no pipeline token is set")
 
         url = self._task_endpoint()
-        headers = self._headers(self.server_config.pipeline_token)
+        headers = self._headers(self.config.pipeline_token)
         body = self._to_serializable(task)
 
         response = self._request("put", url, headers=headers, body=body)
@@ -691,13 +715,13 @@ class Pipeline[T: Task = Task]:
         raise PoliteError("Request processing failed")
 
     def _pipeline_endpoint(self) -> str:
-        return urljoin(self.server_config.url, "pipelines/")
+        return urljoin(self.config.server_url, "pipelines/")
 
     def _task_endpoint(self) -> str:
-        return urljoin(self.server_config.url, "tasks/")
+        return urljoin(self.config.server_url, "tasks/")
 
     def _version_endpoint(self) -> str:
-        return urljoin(self.server_config.url, "versions/")
+        return urljoin(self.config.server_url, "versions/")
 
     def __repr__(self):
         return (
@@ -713,3 +737,35 @@ class Pipeline[T: Task = Task]:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+
+def load_pipeline_config(path: Path) -> Pipeline.Config:
+    return IniData(Pipeline.Config, use_env=True, env_prefix="PORCH_").from_file(
+        Path(path).resolve(), CONFIG_SERVER_SECTION, CONFIG_PIPELINE_SECTION
+    )
+
+
+def write_pipeline_config(config: Pipeline.Config, path: Path):
+    conf = ConfigParser()
+    conf.add_section(CONFIG_PIPELINE_SECTION)
+    for k in [
+        "name",
+        "uri",
+        "version",
+        "task",
+        "compatibility_policy",
+        "compatibility_version",
+    ]:
+        v = getattr(config, k)
+        if v is not None:
+            # Use str() because compatibility_policy is not a string
+            conf.set(CONFIG_PIPELINE_SECTION, k, str(v))
+
+    conf.add_section(CONFIG_SERVER_SECTION)
+    for k in ["server_url", "admin_token", "pipeline_token"]:
+        v = getattr(config, k)
+        if v is not None:
+            conf.set(CONFIG_SERVER_SECTION, k, v)
+
+    with open(Path(path).resolve(), "w") as f:
+        conf.write(f)

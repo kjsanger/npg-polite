@@ -176,6 +176,10 @@ class ShellCommandTask(Task):
     def __init__(self, command: str, params: Mapping[str, str] | None = None):
         super().__init__(Task.Status.PENDING)
 
+        if not isinstance(command, str):
+            raise ValueError(f"Invalid command '{command}'; command must be a string")
+        command = command.strip()
+
         if "\0" in command:
             raise ValueError(f"Invalid command '{command}'; contains NUL characters")
 
@@ -361,7 +365,7 @@ class DatetimeParam:
     datetime: datetime.datetime
 
     def __post_init__(self):
-        if self.datetime is not None and self.datetime.tzinfo != UTC:
+        if self.datetime is not None and self.datetime.utcoffset() != timedelta(0):
             raise ValueError(
                 f"Datetime parameter '{self.name}' is not UTC: '{self.datetime.tzname()}'"
             )
@@ -421,12 +425,27 @@ def make_interval_tasks(
 
     Returns:
         A list of tasks.
+
+    Raises:
+        ValueError: If the interval is not positive, the range is reversed, parameter
+            names clash, or a generated task is invalid.
     """
+    if interval <= timedelta(0):
+        raise ValueError("The interval must be positive")
+    if begin.name == end.name:
+        raise ValueError("The begin and end parameter names must be distinct")
     if end.datetime < begin.datetime:
         raise ValueError(
             f"Invalid time range: end ({end.datetime.isoformat()}) is earlier than "
             f"begin ({begin.datetime.isoformat()})"
         )
+
+    if shared_params is not None:
+        for name in (begin.name, end.name):
+            if name in shared_params:
+                raise ValueError(
+                    f"Name clash between '{name}' parameter and shared parameters: {shared_params}"
+                )
 
     num_intervals = (end.datetime - begin.datetime) / interval
     num_whole = math.ceil(num_intervals)
@@ -456,11 +475,6 @@ def make_interval_tasks(
             end.name: interval_end.isoformat(),
         }
         if shared_params is not None:
-            for k in _params.keys():
-                if k in shared_params:
-                    raise ValueError(
-                        f"Name clash between '{k}' parameter and shared parameters: {shared_params}"
-                    )
             _params.update(shared_params)
 
         if param_factory is not None:
