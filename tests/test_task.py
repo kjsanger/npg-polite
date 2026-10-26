@@ -18,6 +18,7 @@
 
 import json
 import operator
+import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -271,9 +272,11 @@ class TestShellCommandPorch:
     @m.it("Creates only missing tasks and prevents concurrent duplicate claims")
     def test_overlapping_periods(
         self,
-        pipeline: Pipeline[ShellCommandTask],
+        registered_shellcommand_pipeline: Pipeline[ShellCommandTask],
         utc_period_tasks: list[ShellCommandTask],
     ):
+        pipeline = registered_shellcommand_pipeline
+
         assert [pipeline.add(task) for task in utc_period_tasks[:3]] == [
             True,
             True,
@@ -310,10 +313,11 @@ class TestShellCommandPorch:
     @m.it("Preserves the original period and executes after an explicit retry")
     def test_retry(
         self,
-        pipeline: Pipeline[ShellCommandTask],
+        registered_shellcommand_pipeline: Pipeline[ShellCommandTask],
         utc_period_tasks: list[ShellCommandTask],
         tmp_path,
     ):
+        pipeline = registered_shellcommand_pipeline
         ready = tmp_path / "ready"
         output = tmp_path / "output"
 

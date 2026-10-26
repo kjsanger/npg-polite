@@ -18,6 +18,7 @@
 
 import socket
 from collections.abc import Iterator
+from configparser import ConfigParser
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -29,18 +30,17 @@ import requests
 from npg.conf import IniData
 from requests import HTTPError
 
-from npg_polite.porch import Pipeline
+from npg_polite.porch import PIPELINE_CONFIG_SECTION, Pipeline, SERVER_CONFIG_SECTION
 from npg_polite.task import DatetimeParam, IntervalBounds, ShellCommandTask
 
-TEST_CONFIG_FILE = Path("./tests/polite_config.ini")
-
-TEST_CONFIG_SECTION = "PORCH"
+TEST_SERVER_CONFIG_FILE = Path("./tests/polite_config.ini")
+TEST_PIPELINE_CONFIG_FILE = Path("./tests/example_config.ini")
 
 
 def porch_server_available() -> bool:
     """Check if the test Porch server is available."""
     config = IniData(Pipeline.ServerConfig).from_file(
-        TEST_CONFIG_FILE, TEST_CONFIG_SECTION
+        TEST_SERVER_CONFIG_FILE, SERVER_CONFIG_SECTION
     )
     try:
         response = requests.request("GET", config.url, timeout=5)
@@ -59,16 +59,17 @@ def cli_wrapper_path() -> Path:
 @pytest.fixture(scope="function")
 def porch_server_config() -> Pipeline.ServerConfig:
     return IniData(Pipeline.ServerConfig).from_file(
-        TEST_CONFIG_FILE, TEST_CONFIG_SECTION
+        TEST_SERVER_CONFIG_FILE, SERVER_CONFIG_SECTION
     )
 
 
 @pytest.fixture
-def pipeline(porch_server_config) -> Pipeline[ShellCommandTask]:
+def registered_shellcommand_pipeline(porch_server_config) -> Pipeline[ShellCommandTask]:
     config = Pipeline.Config(
         name=f"shell-task-test-{uuid4().hex}",
         uri="https://example.com/shell-task-tests",
         version="1.0.0",
+        task="npg_polite.task.ShellCommandTask",
     )
 
     return Pipeline(
@@ -127,3 +128,32 @@ def timeout_child() -> Iterator[tuple[socket.socket, Path, Path]]:
             listener.listen(1)
             listener.settimeout(2)
             yield listener, script, socket_path
+
+
+def make_pipeline_config_file(
+    path: Path, name: str, uri: str, version: str, task: str
+) -> Path:
+    """Write a pipeline INI configuration with the test server settings.
+
+    Args:
+        path: The destination file, typically inside pytest's tmp_path.
+        name: The pipeline name.
+        uri: The pipeline URI.
+        version: The pipeline version.
+        task: The fully qualified task class name.
+
+    Returns:
+        The path to the configuration file.
+    """
+    config = ConfigParser(interpolation=None)
+    with TEST_SERVER_CONFIG_FILE.open(encoding="utf-8") as source:
+        config.read_file(source)
+    config[PIPELINE_CONFIG_SECTION] = {
+        "name": name,
+        "uri": uri,
+        "version": version,
+        "task": task,
+    }
+    with path.open("w", encoding="utf-8") as destination:
+        config.write(destination)
+    return path

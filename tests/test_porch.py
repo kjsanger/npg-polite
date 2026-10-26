@@ -25,9 +25,20 @@ from uuid import uuid4
 from npg.conf import IniData
 from pytest import mark as m, raises
 
-from conftest import TEST_CONFIG_FILE, TEST_CONFIG_SECTION, porch_server_available
+from conftest import (
+    TEST_PIPELINE_CONFIG_FILE,
+    TEST_SERVER_CONFIG_FILE,
+    porch_server_available,
+)
 from npg_polite import version
-from npg_polite.porch import CompatibilityPolicy, Pipeline, PoliteVersionError, Task
+from npg_polite.porch import (
+    CompatibilityPolicy,
+    PIPELINE_CONFIG_SECTION,
+    Pipeline,
+    PoliteVersionError,
+    SERVER_CONFIG_SECTION,
+    Task,
+)
 
 
 class ExampleTask(Task):
@@ -150,8 +161,9 @@ class TestCompatibilityPolicy:
             name="compatibility-test",
             uri="https://example.com/pipeline",
             version="1.2.3",
-            compat_policy=policy,
-            compat_version=custom,
+            task="tests.test_porch.ExampleTask",
+            compatibility_policy=policy,
+            compatibility_version=custom,
         )
 
         pipeline = Pipeline(
@@ -173,6 +185,7 @@ class TestCompatibilityPolicy:
             name="compatibility-test",
             uri="https://example.com/pipeline",
             version="1.2.3",
+            task="tests.test_porch.ExampleTask",
         )
 
         pipeline = Pipeline(
@@ -181,7 +194,7 @@ class TestCompatibilityPolicy:
             server_config=Pipeline.ServerConfig(url="http://localhost"),
         )
 
-        assert pipeline.compat_policy is CompatibilityPolicy.EXACT
+        assert pipeline.compatibility_policy is CompatibilityPolicy.EXACT
         assert pipeline.compatible_version() == "1.2.3"
 
     @m.context("When an exact or custom policy receives a non-semantic version")
@@ -218,16 +231,27 @@ class TestCompatibilityPolicy:
 @m.skipif(not porch_server_available(), reason="Test Porch server is not available")
 class TestPorchPipeline:
     @m.context("When configured from an INI file")
-    @m.it("Loads the configuration")
+    @m.it("Loads the server configuration")
     def test_configure(self):
-        config = IniData(Pipeline.ServerConfig).from_file(
-            TEST_CONFIG_FILE, TEST_CONFIG_SECTION
+        server_config: Pipeline.ServerConfig = IniData(Pipeline.ServerConfig).from_file(
+            TEST_SERVER_CONFIG_FILE, SERVER_CONFIG_SECTION
         )
 
-        assert config is not None
-        assert config.admin_token == "0" * 32
-        assert config.pipeline_token is None
-        assert config.url is not None
+        assert server_config is not None
+        assert server_config.admin_token == "0" * 32
+        assert server_config.pipeline_token is None
+        assert server_config.url is not None
+
+        pipeline_config: Pipeline.Config = IniData(Pipeline.Config).from_file(
+            TEST_PIPELINE_CONFIG_FILE, PIPELINE_CONFIG_SECTION
+        )
+
+        assert pipeline_config is not None
+        assert pipeline_config.name == "example"
+        assert pipeline_config.uri == "https://example.com/test_pipeline"
+        assert pipeline_config.version == "1.0.1"
+        assert pipeline_config.compatibility_policy == CompatibilityPolicy.MAJOR_MINOR
+        assert pipeline_config.compatibility_version is None
 
     @m.context("When configured from both an INI file and environment variables")
     @m.it("Loads the configuration and falls back to environment variables")
@@ -238,7 +262,7 @@ class TestPorchPipeline:
 
         config: Pipeline.ServerConfig = IniData(
             Pipeline.ServerConfig, use_env=True, env_prefix=env_prefix
-        ).from_file(TEST_CONFIG_FILE, TEST_CONFIG_SECTION)
+        ).from_file(TEST_SERVER_CONFIG_FILE, SERVER_CONFIG_SECTION)
 
         assert config is not None
         assert config.admin_token == "0" * 32
@@ -250,8 +274,9 @@ class TestPorchPipeline:
     def test_register_pipeline(self, porch_server_config):
         config = Pipeline.Config(
             name="test_register_pipeline",
-            uri="http://www.sanger.ac.uk",
+            uri="https://example.com/test_pipeline",
             version=version(),
+            task="tests.test_porch.ExampleTask",
         )
         pipeline = Pipeline(
             ExampleTask, config=config, server_config=porch_server_config
@@ -267,8 +292,9 @@ class TestPorchPipeline:
 
         config = Pipeline.Config(
             name="test_register_pipeline_new_token",
-            uri="http://www.sanger.ac.uk",
+            uri="https://example.com/text_pipeline",
             version=version(),
+            task="tests.test_porch.ExampleTask",
         )
         pipeline = Pipeline(ExampleTask, config=config, server_config=tmp_server_config)
         pipeline = pipeline.register(update_config=True)
@@ -280,8 +306,9 @@ class TestPorchPipeline:
     def test_new_token(self, porch_server_config):
         config = Pipeline.Config(
             name="test_new_token",
-            uri="http://www.sanger.ac.uk",
+            uri="https://example.com/test_pipeline",
             version=version(),
+            task="tests.test_porch.ExampleTask",
         )
 
         pipeline = Pipeline(
@@ -297,8 +324,9 @@ class TestPorchPipeline:
     def test_add_task(self, porch_server_config):
         config = Pipeline.Config(
             name="test_add_task",
-            uri="http://www.sanger.ac.uk",
+            uri="https://example.com/test_pipeline",
             version=version(),
+            task="tests.test_porch.ExampleTask",
         )
 
         pipeline = Pipeline(
@@ -329,8 +357,9 @@ class TestPorchPipeline:
                 ExampleTask,
                 config=Pipeline.Config(
                     name=name,
-                    uri="http://www.sanger.ac.uk",
+                    uri="https://example.com/test_pipeline",
                     version=pipeline_version,
+                    task="tests.test_porch.ExampleTask",
                 ),
                 server_config=porch_server_config,
             ).register(update_config=True)
@@ -356,8 +385,9 @@ class TestPorchPipeline:
     def test_claim_task(self, porch_server_config):
         config = Pipeline.Config(
             name="test_claim_task",
-            uri="http://www.sanger.ac.uk",
+            uri="https://example.com/test_pipeline",
             version=version(),
+            task="tests.test_porch.ExampleTask",
         )
 
         pipeline = Pipeline(
@@ -379,8 +409,9 @@ class TestPorchPipeline:
     def test_update_task(self, porch_server_config):
         config = Pipeline.Config(
             name="test_update_task",
-            uri="http://www.sanger.ac.uk",
+            uri="https://example.com/test_pipeline",
             version=version(),
+            task="tests.test_porch.ExampleTask",
         )
 
         pipeline = Pipeline(

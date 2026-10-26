@@ -16,14 +16,18 @@
 #
 
 import http
+import inspect
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
+from importlib import import_module
+from pathlib import Path
 from typing import Any, Self, cast
 from urllib.parse import urljoin
 
 import requests
+from npg.conf import IniData
 from requests import Response
 from structlog import get_logger
 
@@ -36,6 +40,10 @@ def logger():
 hides the details sending requests to and receiving responses from the Porch server.
 For a request/response-centric API, see https://github.com/wtsi-npg/npg_porch_cli
 """
+
+
+SERVER_CONFIG_SECTION = "PORCH"
+PIPELINE_CONFIG_SECTION = "PIPELINE"
 
 
 class PoliteError(Exception):
@@ -296,7 +304,7 @@ class Pipeline[T: Task = Task]:
         pipeline_token: str | None = field(repr=False, default=None)
         admin_token: str | None = field(repr=False, default=None)
 
-    @dataclass(frozen=True, slots=True)
+    @dataclass(slots=True)
     class Config:
         """Configuration for a Porch pipeline.
 
@@ -304,18 +312,25 @@ class Pipeline[T: Task = Task]:
            name: The pipeline name.
            uri: The pipeline URI.
            version: The pipeline version.
-           compat_policy: The compatibility policy between different versions of the
+           task: The fully qualified class name of the pipeline's tasks.
+           compatibility_policy: The compatibility policy between different versions of the
                pipeline. Defaults to being EXACT i.e. any change to the pipeline's
                version will be exposed to the server.
-           compat_version: An custom compatibility version to be used with the
+           compatibility_version: An custom compatibility version to be used with the
                CUSTOM compatibility policy. Defaults to None.
         """
 
         name: str
         uri: str
         version: str
-        compat_policy: CompatibilityPolicy = CompatibilityPolicy.EXACT
-        compat_version: str | None = None
+        task: str
+        compatibility_policy: str = CompatibilityPolicy.EXACT
+        compatibility_version: str | None = None
+
+        def __post_init__(self):
+            self.compatibility_policy = CompatibilityPolicy(
+                self.compatibility_policy
+            ).value
 
     config: Config
     server_config: ServerConfig
@@ -374,18 +389,20 @@ class Pipeline[T: Task = Task]:
         return self.config.version
 
     @property
-    def compat_policy(self) -> CompatibilityPolicy:
+    def compatibility_policy(self) -> CompatibilityPolicy:
         """Return the pipeline compatibility policy defined its config."""
-        return self.config.compat_policy
+        return CompatibilityPolicy(self.config.compatibility_policy)
 
     @property
-    def compat_version(self) -> str | None:
+    def compatibility_version(self) -> str | None:
         """Return the pipeline compatibility version defined its config."""
-        return self.config.compat_version
+        return self.config.compatibility_version
 
     def compatible_version(self) -> str:
         """Return a compatible pipeline version according to its compatibility policy."""
-        return self.compat_policy.compatible_version(self.version, self.compat_version)
+        return self.compatibility_policy.compatible_version(
+            self.version, self.compatibility_version
+        )
 
     def register(self, update_config: bool = False) -> Self:
         """Register the pipeline with a Porch server.
@@ -713,3 +730,48 @@ class Pipeline[T: Task = Task]:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+
+def load_server_config(path: str) -> Pipeline.ServerConfig:
+    return IniData(Pipeline.ServerConfig, use_env=True, env_prefix="PORCH_").from_file(
+        Path(path).resolve(), SERVER_CONFIG_SECTION
+    )
+
+
+def load_pipeline_config(path: str) -> Pipeline.Config:
+    return IniData(Pipeline.Config).from_file(
+        Path(path).resolve(), section=PIPELINE_CONFIG_SECTION
+    )
+
+
+def resolve_task_class(name: str) -> type[Task]:
+    """Resolve a task class by its fully qualified name in the format
+    ``<module name>.<class name>`` and return the class, if found.
+
+    Args:
+        name: The fully qualified name of the task.
+
+    Returns:
+        The resolved task class.
+
+    Raises:
+        TaskNotFoundError: If the task cannot be found in the specified module,
+        or if the provided 'name' does not follow the expected "module.function"
+        format.
+    """
+    parts = name.rsplit(".", 1)
+    if len(parts) == 1:
+        raise TaskNotFoundError(
+            f"Invalid task name '{name}'; expected a `<module name>.<class name>` string"
+        )
+
+    module_name, class_name = parts
+    logger().debug(f"Resolving task '{name}' in module '{module_name}'")
+
+    module = import_module(module_name)
+
+    for member_name, obj in inspect.getmembers(module, inspect.isclass):
+        if member_name == class_name and issubclass(obj, Task):
+            return obj
+
+    raise TaskNotFoundError(f"Task '{name}' not found")
