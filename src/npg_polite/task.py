@@ -26,7 +26,7 @@ import signal
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, timedelta
+from datetime import timedelta
 from types import MappingProxyType
 from typing import Any, Callable, Self
 
@@ -311,11 +311,12 @@ class ShellCommandTask(Task):
             )
             logger().debug("Shell task environment", pid=pid)
 
-            code = process.wait(timeout=timeout)
+            exit_code = process.wait(timeout=timeout)
+
             logger().info(
-                "Shall task completed", command=command, pid=pid, exit_code=code
+                "Shall task completed", command=command, pid=pid, exit_code=exit_code
             )
-            return code
+            return exit_code
         except Exception:
             self._terminate(command, process)
             raise
