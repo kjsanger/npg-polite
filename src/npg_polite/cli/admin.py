@@ -17,15 +17,13 @@
 
 import argparse
 import json
-from os import pipe
 import sys
-from typing import Callable
 
 from npg.cli import add_logging_arguments, open_input
 from npg.log import configure_structlog
 from structlog import get_logger
 
-from npg_polite.cli.util import add_version_argument
+from npg_polite.cli.util import add_config_argument, add_version_argument
 from npg_polite.porch import Pipeline, Task, load_pipeline_config
 
 
@@ -43,9 +41,7 @@ def register_pipeline_cli(argv: list[str] | None = None) -> int:
     )
     parser = add_logging_arguments(parser)
     parser = add_version_argument(parser)
-    parser.add_argument(
-        "--config", type=str, required=True, help="The pipeline configuration file."
-    )
+    parser = add_config_argument(parser)
 
     args = parser.parse_args()
     configure_structlog(
@@ -94,9 +90,7 @@ def new_pipeline_token_cli(argv: list[str] | None = None) -> int:
     )
     parser = add_logging_arguments(parser)
     parser = add_version_argument(parser)
-    parser.add_argument(
-        "--config", type=str, required=True, help="The pipeline configuration file."
-    )
+    parser = add_config_argument(parser)
 
     args = parser.parse_args(argv)
     configure_structlog(
@@ -136,9 +130,7 @@ def list_pipeline_tasks_cli(argv: list[str] | None = None) -> int:
     )
     parser = add_logging_arguments(parser)
     parser = add_version_argument(parser)
-    parser.add_argument(
-        "--config", type=str, required=True, help="The pipeline configuration file."
-    )
+    parser = add_config_argument(parser)
     parser.add_argument(
         "--state",
         type=str,
@@ -212,9 +204,7 @@ def update_pipeline_tasks_cli(argv: list[str] | None = None) -> int:
     )
     parser = add_logging_arguments(parser)
     parser = add_version_argument(parser)
-    parser.add_argument(
-        "--config", type=str, required=True, help="The pipeline configuration file."
-    )
+    parser = add_config_argument(parser)
     parser.add_argument(
         "state",
         help="The new task state",

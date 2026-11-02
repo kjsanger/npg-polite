@@ -139,6 +139,18 @@ class Task(ABC):
 
 
 def parse_semver(version: str) -> tuple[str, str, str]:
+    """Parses a semantic version string into its major, minor, and patch components.
+
+    This function takes a semantic version string formatted as "major.minor.patch"
+    and splits it into its individual components: major, minor, and patch.
+
+    Args:
+        version: A semantic version string expected to be in the format
+            "major.minor.patch".
+
+    Returns:
+        A tuple containing the major, minor, and patch components as strings.
+    """
     parts = version.split(".")
     if not len(parts) == 3:
         raise PoliteVersionError(f"Invalid semantic version '{version}'")
@@ -251,7 +263,7 @@ class Pipeline[T: Task = Task]:
 
         config = Pipeline.Config(
             name="Sum of two integers",
-            uri="http://localhost/sum",
+            uri="http://example.com/sum",
             version="1.0.0",
             task=f"{SumTask.__module__}.{SumTask.__qualname__}",
         )
@@ -276,7 +288,7 @@ class Pipeline[T: Task = Task]:
             p.fail(task)  # Tell the Porch server that the task failed
 
     Porch will ensure that each task is created exactly once and that each task is
-    claimed for processing once, by only one worker.
+    claimed for processing at least once.
 
     This class uses the Porch REST API. See the Porch documentation for more
     information. It has a timeout of 10 seconds and will retry failed requests up to 3

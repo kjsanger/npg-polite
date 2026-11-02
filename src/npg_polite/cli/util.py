@@ -23,8 +23,18 @@ from npg_polite import version
 def add_version_argument(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
-        help="Print the version and exit.",
         action="version",
         version=version(),
+        help="Print the version and exit.",
+    )
+    return parser
+
+
+def add_config_argument(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="The pipeline configuration file.",
     )
     return parser

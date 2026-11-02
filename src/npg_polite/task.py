@@ -24,9 +24,12 @@ import re
 import shlex
 import signal
 import subprocess
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
+from io import FileIO
+from threading import Lock, Thread
 from types import MappingProxyType
 from typing import Any, Callable, Self
 
@@ -53,6 +56,123 @@ def logger():
     return get_logger(__name__)
 
 
+class TailBuffer(FileIO):
+    """Capture a subprocess stream, retaining only its most recent bytes.
+
+    Pass this object as ``Popen``'s stdout or stderr. A background thread drains
+    an OS pipe into a bounded deque of byte values. FileIO owns the pipe's write
+    descriptor and provides binary file operations. Use separate instances to
+    capture both streams independently.
+
+    Wait for, or terminate the child before closing the capture. Closing releases
+    the parent's write descriptor and waits for the reader to reach EOF. If a
+    child still holds the pipe open, close raises TimeoutError; stop that child
+    and call close again. Captured bytes remain available after closing.
+
+    The ``closed`` property describes the write endpoint. A successful close
+    also guarantees that the reader has finished capturing output.
+
+    Example: ::
+
+        with TailBuffer(65536) as output:
+            subprocess.run(["echo", "hello"], stdout=output, check=True)
+        tail = output.getvalue()
+
+    Using a stdlib deque is less efficient than e.g. creating a custom ring buffer with
+    a plain byte array, but very much simpler. This class is not intended to deal
+    efficiently with massive output streams, but rather to avoid failure where that
+    does happen and still retain a possibly useful diagnostic from the end of the
+    stream.
+
+    Args:
+        capacity: Maximum number of bytes to retain; must be positive.
+    """
+
+    def __init__(self, capacity: int = 65_536):
+        if capacity <= 0:
+            raise ValueError(f"Invalid capacity '{capacity}'; value must be positive")
+
+        read_fd: int | None = None
+        write_fd: int | None = None
+
+        self._reader: Thread | None = None
+        self._error: OSError | None = None
+
+        self._buffer: deque[int] = deque(maxlen=capacity)
+        self._byte_count = 0
+        self._lock = Lock()
+
+        try:
+            read_fd, write_fd = os.pipe()
+            # FileIO becomes responsible for closing the writer
+            super().__init__(write_fd, "wb", closefd=True)
+        except Exception:
+            if read_fd is not None:
+                os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
+            raise
+
+        try:
+            reader = Thread(target=self._consume, args=(read_fd,), daemon=True)
+            reader.start()
+        except Exception:
+            if read_fd is not None:
+                os.close(read_fd)
+            super().close()
+            raise
+
+        self._reader = reader
+
+    def getvalue(self) -> bytes:
+        """Return a snapshot of retained bytes, ordered oldest to newest."""
+        with self._lock:
+            return bytes(self._buffer)
+
+    def bytes_read(self) -> int:
+        """Return the total number of bytes read from the stream."""
+        with self._lock:
+            return self._byte_count
+
+    def close(self, timeout: float | int = 3) -> None:
+        """Close the write descriptor and wait for capture to finish.
+
+        Args:
+            timeout: Finite, positive maximum wait for EOF, in seconds.
+
+        Raises:
+            TimeoutError: If a process still holds the pipe open. Retry closing
+                after terminating it; this object does not manage child processes.
+            OSError: If the reader failed.
+        """
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError(
+                f"Invalid timeout '{timeout}'; value must be finite and positive"
+            )
+
+        super().close()
+        if self._reader is None:
+            return
+
+        self._reader.join(timeout)
+
+        if self._reader.is_alive():
+            raise TimeoutError("Tail buffer reader did not reach EOF")
+        if self._error is not None:
+            raise OSError("Failed to read subprocess output") from self._error
+
+    def _consume(self, read_fd: int) -> None:
+        try:
+            while chunk := os.read(read_fd, 65_536):
+                with self._lock:
+                    self._byte_count += len(chunk)
+                    self._buffer.extend(chunk)
+        except OSError as error:
+            self._error = error
+        finally:
+            os.close(read_fd)
+
+
 class ShellCommandTask(Task):
     """Represent a trusted Bash command with separately bound string parameters.
 
@@ -70,7 +190,7 @@ class ShellCommandTask(Task):
 
     Parameters are interpolated into placeholders of the form `{:name:}` where the
     literal `name` corresponds to its name. No whitespace is permitted between the
-    `{:` and `:}`  delimiters.
+    `{:` and `:}` delimiters.
 
     Parameter names must match the regular expression `[A-Za-z_][A-Za-z0-9_]*`
     and values must be strings. Each value is quoted using `shlex.quote()` and then
@@ -201,7 +321,7 @@ class ShellCommandTask(Task):
 
             if not re.fullmatch(SHELL_VALUE_PATTERN, name):
                 raise ValueError(
-                    f"Invalid parameter name '{name}'; is not a valid shell identifier"
+                    f"Invalid parameter name '{name}'; not a valid shell identifier"
                 )
 
         self._command = command
@@ -258,8 +378,12 @@ class ShellCommandTask(Task):
         return "".join(parts)
 
     def execute(
-        self, *, timeout: float | int, cwd: str | os.PathLike[str] | None = None
-    ) -> int:
+        self,
+        *,
+        timeout: float | int,
+        cwd: str | os.PathLike[str] | None = None,
+        tail_capacity: int = 512,
+    ) -> subprocess.CompletedProcess[bytes]:
         """Execute the command synchronously and return its exit code.
 
         Use Bash with unset-variable checking and pipefail, inheriting STDOUT and
@@ -273,9 +397,11 @@ class ShellCommandTask(Task):
         Args:
             timeout: Maximum execution time in seconds; must be finite and positive.
             cwd: Working directory, defaulting to the caller's working directory.
+            tail_capacity: The size in bytes of the tail of both STDOUT and STDERR to
+                retain. Optional, defaults to 512 bytes.
 
         Returns:
-            The exit code of the command.
+            A ``CompletedProcess`` object (like ``subprocess.run()``)
 
         Raises:
             ValueError: If the timeout is not a positive number.
@@ -301,25 +427,62 @@ class ShellCommandTask(Task):
             command,
         ]
 
-        process = subprocess.Popen[bytes](
-            process_args, cwd=cwd, env=env, start_new_session=True
-        )
-        try:
-            pid = process.pid
-            logger().info(
-                "Shell task started", command=command, cwd=cwd, timeout=timeout, pid=pid
-            )
-            logger().debug("Shell task environment", pid=pid)
+        pid: int | None = None
+        exit_code: int | None = None
 
-            exit_code = process.wait(timeout=timeout)
-
-            logger().info(
-                "Shall task completed", command=command, pid=pid, exit_code=exit_code
+        with (
+            TailBuffer(tail_capacity) as stdout_buff,
+            TailBuffer(tail_capacity) as stderr_buff,
+        ):
+            process = subprocess.Popen[bytes](
+                process_args,
+                cwd=cwd,
+                env=env,
+                start_new_session=True,
+                stdout=stdout_buff,
+                stderr=stderr_buff,
             )
-            return exit_code
-        except Exception:
-            self._terminate(command, process)
-            raise
+            try:
+                pid = process.pid
+                logger().info(
+                    "Shell task started",
+                    command=command,
+                    cwd=cwd,
+                    timeout=timeout,
+                    pid=pid,
+                )
+                logger().debug("Shell task environment", pid=pid)
+
+                exit_code = process.wait(timeout=timeout)
+
+                logger().info(
+                    "Shell task completed",
+                    command=command,
+                    pid=pid,
+                    exit_code=exit_code,
+                    stdout_bytes=stdout_buff.bytes_read(),
+                    stdout_tail=stdout_buff.getvalue(),
+                    stderr_bytes=stderr_buff.bytes_read(),
+                    stderr_tail=stderr_buff.getvalue(),
+                )
+                return subprocess.CompletedProcess(
+                    command, exit_code, stdout_buff.getvalue(), stderr_buff.getvalue()
+                )
+
+            except Exception:
+                self._terminate(command, process)
+                logger().error(
+                    "Shall task failed",
+                    command=command,
+                    pid=pid,
+                    exit_code=exit_code,
+                    stdout_bytes=stdout_buff.bytes_read(),
+                    stdout_tail=stdout_buff.getvalue(),
+                    stderr_bytes=stderr_buff.bytes_read(),
+                    stderr_tail=stderr_buff.getvalue(),
+                )
+
+                raise
 
     def __repr__(self):
         return f"ShellCommandTask('{self.command}', {self.params})"

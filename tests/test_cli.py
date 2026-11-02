@@ -289,7 +289,7 @@ class TestIntervalCLI:
         self, registered_shellcmd_pipeline, interval_cli_arguments, interval_cli_process
     ):
         pipeline, args = registered_shellcmd_pipeline, interval_cli_arguments
-        args = args + ["echo {:start:} {:stop:}"]
+        args += ["echo {:start:} {:stop:}"]
         result = interval_cli_process(args)
         assert result.returncode == 0, result.stdout + result.stderr
         before = sorted(pipeline.all(), key=lambda task: task.params["start"])

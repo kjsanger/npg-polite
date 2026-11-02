@@ -19,6 +19,7 @@ dynamic = ["version"]
 requires-python = ">=3.13"
 
 dependencies = [
+    "certifi >= 2026.10.19",
     "requests >=2.34",
     "structlog >=25",
     "npg-python-lib >= 2.0.0"

@@ -17,13 +17,15 @@
 
 import json
 import operator
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 from socket import socket
-from unittest.mock import Mock
+from typing import IO
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import pytest
@@ -33,10 +35,92 @@ from npg_polite.porch import Pipeline, Task
 from npg_polite.task import (
     DatetimeParam,
     IntervalBounds,
+    TailBuffer,
     ShellCommandTask,
     make_interval_tasks,
 )
 from tests.conftest import porch_server_available
+
+
+@m.describe("Subprocess output tail buffer capture")
+class TestTailBufferCapture:
+    @m.context("When subprocess output exceeds the capture capacity")
+    @m.it("Drains both streams and retains their exact binary tails and byte counts")
+    @m.parametrize("capacity", [1, 31, 65536])
+    def test_large_output(self, capacity):
+        stdout_data = bytes(range(256)) * 8192 + b"stdout tail"
+        stderr_data = bytes(reversed(range(256))) * 8192 + b"stderr tail"
+        script = (
+            "import sys; "
+            "sys.stdout.buffer.write(bytes(range(256)) * 8192 + b'stdout tail'); "
+            "sys.stdout.buffer.flush(); "
+            "sys.stderr.buffer.write(bytes(reversed(range(256))) * 8192 + b'stderr tail')"
+        )
+
+        with TailBuffer(capacity) as stdout, TailBuffer(capacity) as stderr:
+            with subprocess.Popen(
+                [sys.executable, "-c", script], stdout=stdout, stderr=stderr
+            ) as process:
+                try:
+                    assert process.wait(timeout=30) == 0
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+
+        assert stdout.getvalue() == stdout_data[-capacity:]
+        assert stderr.getvalue() == stderr_data[-capacity:]
+        assert stdout.bytes_read() == len(stdout_data)
+        assert stderr.bytes_read() == len(stderr_data)
+
+    @m.context("When output does not fill the buffer")
+    @m.it("Returns only the bytes written and permits repeated close calls")
+    @m.parametrize("data", [b"", b"hello\x00\xff", b"0123456789abcdef"])
+    def test_short_output(self, data):
+        with TailBuffer(16) as capture:
+            os.write(capture.fileno(), data)
+
+        assert capture.getvalue() == data
+
+        capture.close()
+        with raises(ValueError, match="closed"):
+            capture.fileno()
+
+    @m.context("When capture is used as a binary file object")
+    @m.it("Supports IO[bytes] writes and closes the write endpoint")
+    def test_binary_io(self):
+        with TailBuffer(4) as capture:
+            stream: IO[bytes] = capture
+
+            assert not stream.closed
+            assert stream.writable()
+            assert not stream.readable()
+            assert not stream.seekable()
+            assert stream.write(b"abcdef") == 6
+            stream.flush()
+
+        assert stream.closed
+        assert capture.getvalue() == b"cdef"
+
+        with raises(ValueError, match="closed"):
+            stream.write(b"more")
+
+    @m.context("When another writer keeps the pipe open")
+    @m.it("Bounds the close wait and allows cleanup to be retried")
+    def test_close_timeout(self):
+        capture = TailBuffer(16)
+        writer = os.dup(capture.fileno())
+
+        try:
+            with raises(TimeoutError, match="EOF"):
+                capture.close(timeout=0.01)
+            assert capture.closed
+            os.write(writer, b"last bytes")
+        finally:
+            os.close(writer)
+            capture.close()
+
+        assert capture.getvalue() == b"last bytes"
 
 
 @m.describe("Shell command task input")
@@ -152,7 +236,7 @@ class TestShellExecution:
     def test_literal_marker(self, capfd):
         task = ShellCommandTask("printf '%s' '{{:missing:}}'")
 
-        assert task.execute(timeout=5) == 0
+        assert task.execute(timeout=5).returncode == 0
         assert "{:missing:}" in capfd.readouterr().out
 
     @m.context("When parameters contain shell syntax")
@@ -176,7 +260,7 @@ class TestShellExecution:
 
         task = ShellCommandTask('printf "%s" {:value:} > output', {"value": value})
 
-        assert task.execute(timeout=5, cwd=tmp_path) == 0
+        assert task.execute(timeout=5, cwd=tmp_path).returncode == 0
         assert output.read_text() == value
         assert not injected.exists()
         assert task.status == Task.Status.PENDING
@@ -184,37 +268,40 @@ class TestShellExecution:
     @m.context("When commands write to stdout and stderr")
     @m.it("Inherits the caller's output streams")
     def test_output(self, capfd):
-        # If test logs are enabled, there may be additional noise in the outputs, so
-        # look for these UUIDs
         out_uuid = str(uuid4())
         err_uuid = str(uuid4())
-        assert (
-            ShellCommandTask(f"printf {out_uuid}; printf {err_uuid} >&2").execute(
-                timeout=5
-            )
-            == 0
-        )
+        task = ShellCommandTask(f"printf {out_uuid}; printf {err_uuid} >&2")
 
-        output = capfd.readouterr()
-        assert out_uuid in output.out
-        assert err_uuid in output.err
+        completed = task.execute(timeout=5)
+        assert completed.returncode == 0
+
+        caller_output = capfd.readouterr()
+        assert out_uuid not in caller_output
+        assert err_uuid not in caller_output
+
+        assert out_uuid in completed.stdout.decode(encoding="utf-8")
+        assert err_uuid in completed.stderr.decode(encoding="utf-8")
 
     @m.context("When the parent environment supplies variables or local time")
     @m.it("Preserves ordinary variables and runs in UTC without Bash startup hooks")
-    def test_environment(self, tmp_path, monkeypatch):
+    def test_environment(self, tmp_path):
         startup = tmp_path / "startup"
         startup.write_text("exit 99\n")
 
-        monkeypatch.setenv("BASH_ENV", str(startup))
-        monkeypatch.setenv("TASK_stale", "stale")
-        monkeypatch.setenv("TASK_value", "inherited")
-        monkeypatch.setenv("TZ", "Europe/London")
-
-        task = ShellCommandTask(
-            'test "$TASK_stale" = stale && test "$TASK_value" = inherited && test {:value:} = bound && test "$TZ" = UTC',
-            {"value": "bound"},
-        )
-        assert task.execute(timeout=5) == 0
+        with patch.dict(
+            "os.environ",
+            {
+                "BASH_ENV": str(startup),
+                "TASK_stale": "stale",
+                "TASK_value": "inherited",
+                "TZ": "Europe/London",
+            },
+        ):
+            task = ShellCommandTask(
+                'test "$TASK_stale" = stale && test "$TASK_value" = inherited && test {:value:} = bound && test "$TZ" = UTC',
+                {"value": "bound"},
+            )
+            assert task.execute(timeout=5).returncode == 0
 
     @m.context("When a command or pipeline fails")
     @m.it("Returns a nonzero exit code")
@@ -302,7 +389,7 @@ class TestShellCommandPorch:
 
         for task in claimed:
             task = pipeline.run(task)
-            assert task.execute(timeout=5) == 0
+            assert task.execute(timeout=5).returncode == 0
             pipeline.done(task)
 
         assert len(pipeline.succeeded()) == 4
@@ -333,7 +420,7 @@ class TestShellCommandPorch:
         assert pipeline.add(task)
 
         claimed = pipeline.run(pipeline.claim()[0])
-        assert claimed.execute(timeout=5) != 0
+        assert claimed.execute(timeout=5).returncode != 0
 
         pipeline.fail(claimed)
         assert pipeline.failed() == [task]
@@ -344,7 +431,7 @@ class TestShellCommandPorch:
         pipeline.retry(pipeline.failed()[0])
         retried = pipeline.run(pipeline.claim()[0])
         assert retried.to_serializable() == original_input
-        assert retried.execute(timeout=5) == 0
+        assert retried.execute(timeout=5).returncode == 0
 
         pipeline.done(retried)
         assert pipeline.succeeded() == [task]
