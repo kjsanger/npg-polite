@@ -430,10 +430,16 @@ class ShellCommandTask(Task):
         pid: int | None = None
         exit_code: int | None = None
 
+        num_out_bytes: int = 0
+        num_err_bytes: int = 0
+        out_chars: str = ""
+        err_chars: str = ""
+
         with (
             TailBuffer(tail_capacity) as stdout_buff,
             TailBuffer(tail_capacity) as stderr_buff,
         ):
+
             process = subprocess.Popen[bytes](
                 process_args,
                 cwd=cwd,
@@ -454,16 +460,28 @@ class ShellCommandTask(Task):
                 logger().debug("Shell task environment", pid=pid)
 
                 exit_code = process.wait(timeout=timeout)
+                num_out_bytes = stdout_buff.bytes_read()
+                num_err_bytes = stderr_buff.bytes_read()
+
+                # We don't know what we'll get in STDOUT/STDERR. It is likely to be
+                # UTF-8, but even then could include partial chars. It could be binary
+                # data in some cases.
+                out_chars = stdout_buff.getvalue().decode(
+                    encoding="utf-8", errors="replace"
+                )
+                err_chars = stderr_buff.getvalue().decode(
+                    encoding="utf-8", errors="replace"
+                )
 
                 logger().info(
                     "Shell task completed",
                     command=command,
                     pid=pid,
                     exit_code=exit_code,
-                    stdout_bytes=stdout_buff.bytes_read(),
-                    stdout_tail=stdout_buff.getvalue(),
-                    stderr_bytes=stderr_buff.bytes_read(),
-                    stderr_tail=stderr_buff.getvalue(),
+                    stdout_bytes=num_out_bytes,
+                    stdout_tail=out_chars,
+                    stderr_bytes=num_err_bytes,
+                    stderr_tail=err_chars,
                 )
                 return subprocess.CompletedProcess(
                     command, exit_code, stdout_buff.getvalue(), stderr_buff.getvalue()
@@ -476,10 +494,10 @@ class ShellCommandTask(Task):
                     command=command,
                     pid=pid,
                     exit_code=exit_code,
-                    stdout_bytes=stdout_buff.bytes_read(),
-                    stdout_tail=stdout_buff.getvalue(),
-                    stderr_bytes=stderr_buff.bytes_read(),
-                    stderr_tail=stderr_buff.getvalue(),
+                    stdout_bytes=num_out_bytes,
+                    stdout_tail=out_chars,
+                    stderr_bytes=num_err_bytes,
+                    stderr_tail=err_chars,
                 )
 
                 raise

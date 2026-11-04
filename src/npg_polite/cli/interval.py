@@ -148,6 +148,15 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
         "--config", type=str, required=True, help="The pipeline configuration file."
     )
     parser.add_argument(
+        "--max-running",
+        type=int,
+        default=1,
+        help="The maximum number of tasks that should be running at once. Once this "
+        "number of running tasks in the current pipeline is reached (or exceeded),"
+        "further attempts to start tasks will be skipped, until the number running "
+        "falls below this threshold. Optional, defaults to 1.",
+    )
+    parser.add_argument(
         "--task-timeout",
         type=str,
         help="Maximum duration permitted for a task. Tasks that are still running at the "
@@ -177,6 +186,7 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
 
     try:
         work_dir = Path(args.working_directory).resolve(strict=True).as_posix()
+        max_running = _parse_max_running(args.max_running)
         timeout = _parse_interval(args.task_timeout).total_seconds()
 
         config = load_pipeline_config(args.config)
@@ -184,7 +194,6 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
         if pipeline.cls is not ShellCommandTask:
             raise ValueError("Interval tasks require the ShellCommandTask task class")
 
-        max_running = 2
         running_tasks = pipeline.running()
         num_running = len(running_tasks)
         if num_running >= max_running:
@@ -213,6 +222,7 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
             else:
                 pipeline.fail(command_task)
         except subprocess.TimeoutExpired:
+            logger().error("Command timed out", timeout=timeout, task=command_task)
             pipeline.fail(command_task)
 
         return 0
@@ -221,6 +231,16 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
         if args.debug:
             raise
         return 1
+
+
+def _parse_max_running(value: str) -> int:
+    try:
+        n = int(value)
+        if n < 1:
+            raise ValueError("Max running must be a positive integer")
+        return n
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"Invalid max running value '{value}'") from e
 
 
 def _parse_named_value(value: str) -> tuple[str, str]:
@@ -238,7 +258,7 @@ def _parse_named_datetime(value: str) -> tuple[str, datetime]:
         return name, datetime.fromisoformat(timestamp)
     except ValueError as e:
         raise argparse.ArgumentTypeError(
-            f"invalid ISO-format timestamp in '{value}'"
+            f"Invalid ISO-format timestamp in '{value}'"
         ) from e
 
 
@@ -247,10 +267,11 @@ def _parse_interval(value: str) -> timedelta:
     match = re.fullmatch(r"([+-]?[0-9]+)([smhd])", value)
     if match is None:
         raise argparse.ArgumentTypeError(
-            f"Invalid time interval '{value}'; expected an integer followed by s, m, h or d (e.g. 3600s, 6h, 1d)"
+            f"Invalid time interval '{value}'; "
+            f"expected an integer followed by s, m, h or d (e.g. 3600s, 6h, 1d)"
         )
     units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     try:
         return timedelta(seconds=int(match[1]) * units[match[2]])
     except (ValueError, OverflowError) as e:
-        raise argparse.ArgumentTypeError("duration is too large") from e
+        raise argparse.ArgumentTypeError("Duration is too large") from e
