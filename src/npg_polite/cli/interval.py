@@ -207,8 +207,8 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
         pipeline.run(command_task)
 
         try:
-            exit_code = command_task.execute(cwd=work_dir, timeout=timeout)
-            if exit_code == 0:
+            completed = command_task.execute(cwd=work_dir, timeout=timeout)
+            if completed.returncode == 0:
                 pipeline.done(command_task)
             else:
                 pipeline.fail(command_task)
