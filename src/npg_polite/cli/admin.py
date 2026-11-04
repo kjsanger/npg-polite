@@ -146,6 +146,7 @@ def list_pipeline_tasks_cli(argv: list[str] | None = None) -> int:
             "succeeded",
         ],
         help="The state(s) of tasks to list.",
+        default=[],
     )
 
     args = parser.parse_args(argv)
