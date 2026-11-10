@@ -51,28 +51,28 @@ def add_interval_tasks_cli(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--begin",
         required=True,
-        type=_parse_named_datetime,
+        type=named_datetime,
         metavar="NAME=TIMESTAMP",
         help="First boundary and parameter name; timestamp must be UTC (Z or +00:00).",
     )
     parser.add_argument(
         "--end",
         required=True,
-        type=_parse_named_datetime,
+        type=named_datetime,
         metavar="NAME=TIMESTAMP",
         help="Final boundary and parameter name; timestamp must be UTC (Z or +00:00).",
     )
     parser.add_argument(
         "--interval",
         required=True,
-        type=_parse_interval,
+        type=interval_string,
         metavar="DURATION",
         help="Positive integer duration with s, m, h or d suffix; a day is 24 hours.",
     )
     parser.add_argument(
         "--param",
         action="append",
-        type=_parse_named_value,
+        type=named_value,
         default=[],
         metavar="NAME=VALUE",
         help="Shared string parameter; repeat for additional parameters.",
@@ -149,7 +149,7 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--max-running",
-        type=int,
+        type=positive_integer,
         default=1,
         help="The maximum number of tasks that should be running at once. Once this "
         "number of running tasks in the current pipeline is reached (or exceeded),"
@@ -158,7 +158,7 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--task-timeout",
-        type=str,
+        type=interval_string,
         help="Maximum duration permitted for a task. Tasks that are still running at the "
         "end of this period will be killed automatically. Optional, defaults to 30m.",
         default="30m",
@@ -182,12 +182,12 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
 
     if argv is None:
         argv = sys.argv[1:]
-    logger().debug("Add interval tasks", argv=" ".join(argv))
+    logger().debug("Run interval task", argv=" ".join(argv))
 
     try:
         work_dir = Path(args.working_directory).resolve(strict=True).as_posix()
-        max_running = _parse_max_running(args.max_running)
-        timeout = _parse_interval(args.task_timeout).total_seconds()
+        max_running = args.max_running
+        timeout = args.task_timeout.total_seconds()
 
         config = load_pipeline_config(args.config)
         pipeline = Pipeline[ShellCommandTask](config=config)
@@ -201,7 +201,7 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
                 "The maximum number of tasks are already running",
                 name=pipeline.name,
                 version=pipeline.version,
-                max_runnng=max_running,
+                max_running=max_running,
                 num_running=num_running,
                 tasks=running_tasks,
             )
@@ -233,7 +233,9 @@ def run_interval_task_cli(argv: list[str] | None = None) -> int:
         return 1
 
 
-def _parse_max_running(value: str) -> int:
+def positive_integer(value: str) -> int:
+    """Parse a positive integer from a command-line value."""
+    value = value.strip()
     try:
         n = int(value)
         if n < 1:
@@ -243,17 +245,18 @@ def _parse_max_running(value: str) -> int:
         raise argparse.ArgumentTypeError(f"Invalid max running value '{value}'") from e
 
 
-def _parse_named_value(value: str) -> tuple[str, str]:
+def named_value(value: str) -> tuple[str, str]:
     """Split a named command-line value at its first equals sign."""
+    value = value.strip()
     name, separator, content = value.partition("=")
     if not separator:
         raise argparse.ArgumentTypeError(f"Invalid NAME=VALUE pair '{value}'")
     return name, content
 
 
-def _parse_named_datetime(value: str) -> tuple[str, datetime]:
+def named_datetime(value: str) -> tuple[str, datetime]:
     """Parse a named ISO-format timestamp."""
-    name, timestamp = _parse_named_value(value)
+    name, timestamp = named_value(value)
     try:
         return name, datetime.fromisoformat(timestamp)
     except ValueError as e:
@@ -262,9 +265,10 @@ def _parse_named_datetime(value: str) -> tuple[str, datetime]:
         ) from e
 
 
-def _parse_interval(value: str) -> timedelta:
+def interval_string(value: str) -> timedelta:
     """Parse an integer duration with a seconds, minutes, hours, or days suffix."""
-    match = re.fullmatch(r"([+-]?[0-9]+)([smhd])", value)
+    value = value.strip()
+    match = re.fullmatch(r"([0-9]+)([smhd])", value)
     if match is None:
         raise argparse.ArgumentTypeError(
             f"Invalid time interval '{value}'; "

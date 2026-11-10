@@ -125,7 +125,7 @@ LIST_TASKS = "List a pipeline's tasks."
 
 def list_pipeline_tasks_cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description=NEW_PIPELINE_TOKEN,
+        description=LIST_TASKS,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser = add_logging_arguments(parser)
@@ -158,6 +158,10 @@ def list_pipeline_tasks_cli(argv: list[str] | None = None) -> int:
         json=args.log_json,
     )
 
+    if argv is None:
+        argv = sys.argv[1:]
+    logger().debug("List pipeline tasks", argv=" ".join(argv))
+
     try:
         config = load_pipeline_config(args.config)
         pipeline = Pipeline(config=config)
@@ -175,6 +179,8 @@ def list_pipeline_tasks_cli(argv: list[str] | None = None) -> int:
                     _print_tasks(pipeline.claimed())
                 case "failed":
                     _print_tasks(pipeline.failed())
+                case "pending":
+                    _print_tasks(pipeline.pending())
                 case "running":
                     _print_tasks(pipeline.running())
                 case "succeeded":
@@ -182,7 +188,7 @@ def list_pipeline_tasks_cli(argv: list[str] | None = None) -> int:
 
         return 0
     except Exception as e:
-        logger().error("Pipeline token creation failed", error=str(e))
+        logger().error("Listing tasks failed", error=str(e))
 
         if args.debug:
             raise

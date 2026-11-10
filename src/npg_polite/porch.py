@@ -17,6 +17,7 @@
 
 import http
 import inspect
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -205,11 +206,11 @@ class CompatibilityPolicy(StrEnum):
             case CompatibilityPolicy.CUSTOM:
                 if custom is None:
                     raise PoliteVersionError(
-                        f"No custom version was supplied for '{version}"
+                        f"No custom version was supplied for '{version}'"
                     )
                 return custom
             case _:
-                raise PoliteError(f"Unexpected compatibility policy '{self}")
+                raise PoliteError(f"Unexpected compatibility policy '{self}'")
 
 
 class Pipeline[T: Task = Task]:
@@ -752,12 +753,28 @@ class Pipeline[T: Task = Task]:
 
 
 def load_pipeline_config(path: Path) -> Pipeline.Config:
+    """Load a pipeline configuration from a file."""
     return IniData(Pipeline.Config, use_env=True, env_prefix="PORCH_").from_file(
         Path(path).resolve(), CONFIG_SERVER_SECTION, CONFIG_PIPELINE_SECTION
     )
 
 
 def write_pipeline_config(config: Pipeline.Config, path: Path):
+    """Write a pipeline configuration to an INI-style file.
+
+    The target file is created or overwritten with restrictive file permissions so
+    that only the owner can read and write it.
+
+    Args:
+        config: A pipeline configuration.
+        path: The path for the configuration file.
+
+    Raises:
+        AttributeError: If the configuration object does not expose an expected
+            field.
+        OSError: If the destination file cannot be created, opened, truncated, or
+            written.
+    """
     conf = ConfigParser()
     conf.add_section(CONFIG_PIPELINE_SECTION)
     for k in [
@@ -779,5 +796,13 @@ def write_pipeline_config(config: Pipeline.Config, path: Path):
         if v is not None:
             conf.set(CONFIG_SERVER_SECTION, k, v)
 
-    with open(Path(path).resolve(), "w") as f:
+    # Ensure 0600 because of access tokens
+    def opener(_path: str, _: int) -> int:
+        return os.open(
+            path=_path,
+            flags=(os.O_WRONLY | os.O_CREAT | os.O_TRUNC),
+            mode=0o600,
+        )
+
+    with open(Path(path).resolve(), "w", opener=opener) as f:
         conf.write(f)

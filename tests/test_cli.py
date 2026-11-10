@@ -144,7 +144,7 @@ class TestIntervalCLI:
                 {
                     "start": f"2026-01-21T{start:02d}:00:00+00:00",
                     "stop": f"2026-01-21T{stop:02d}:00:00+00:00",
-                    "dataset": " run=42 ",
+                    "dataset": " run=42",  # Terminal space stripped by CLI parser
                     "empty": "",
                 },
             )
@@ -216,18 +216,18 @@ class TestIntervalCLI:
     @m.context("When task-layer validation rejects an input")
     @m.it("Exits with a failure and leaves the pipeline empty")
     @m.parametrize(
-        "options, command",
+        "options, command, exit_code",
         [
-            (["--interval=0s"], "echo"),
-            (["--interval=-1h"], "echo"),
-            (["--begin", "start=2026-01-21T00:00:00"], "echo"),
-            (["--begin", "start=2026-01-21T00:00:00+01:00"], "echo"),
-            (["--end", "stop=2026-01-20T00:00:00Z"], "echo"),
-            (["--end", "start=2026-01-21T03:00:00Z"], "echo"),
-            (["--param", "start=override"], "echo"),
-            (["--param", "bad-name=value"], "echo"),
-            ([], "echo {:missing:}"),
-            ([], "echo {:broken"),
+            (["--interval=0s"], "echo", 1),
+            (["--interval=-1h"], "echo", 2),  # Rejected by interval type parser
+            (["--begin", "start=2026-01-21T00:00:00"], "echo", 1),
+            (["--begin", "start=2026-01-21T00:00:00+01:00"], "echo", 1),
+            (["--end", "stop=2026-01-20T00:00:00Z"], "echo", 1),
+            (["--end", "start=2026-01-21T03:00:00Z"], "echo", 1),
+            (["--param", "start=override"], "echo", 1),
+            (["--param", "bad-name=value"], "echo", 1),
+            ([], "echo {:missing:}", 1),
+            ([], "echo {:broken", 1),
         ],
     )
     def test_domain_errors(
@@ -237,11 +237,12 @@ class TestIntervalCLI:
         interval_cli_arguments,
         options,
         command,
+        exit_code,
     ):
         pipeline, args = registered_shellcmd_pipeline, interval_cli_arguments
         result = interval_cli_process(args + options + [command])
         assert (
-            result.returncode == 1
+            result.returncode == exit_code
         ), f"STDOUT: '{result.stdout}', STDERR: '{result.stderr}'"
         assert pipeline.all() == []
 

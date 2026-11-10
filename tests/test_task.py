@@ -307,7 +307,7 @@ class TestShellExecution:
     @m.it("Returns a nonzero exit code")
     @m.parametrize("command", ["exit 7", "false | true", 'printf "%s" "$TASK_missing"'])
     def test_failure(self, command):
-        assert ShellCommandTask(command).execute(timeout=5) != 0
+        assert ShellCommandTask(command).execute(timeout=5).returncode != 0
 
     @m.context("When the process cannot start")
     @m.it("Propagates the launch error")

@@ -7,7 +7,7 @@ A minimal, task-centric API for interacting with a [Porch](https://github.com/wt
 # Summary
 
 This library hides the details of sending requests to and receiving responses from a Porch
-server, presenting a pipleline- and task-centric API instead.
+server, presenting a pipeline- and task-centric API instead.
 
 ## Use
 
@@ -18,23 +18,24 @@ a pipeline in one place where it can be passed to the Pipeline constructor.
 
 The configurable values are:
 
-- url: The base URL of the Porch server.
+- server_url: The base URL of the Porch server.
 - pipeline_token: The pipeline token for the Porch server (used to work with an existing pipeline).
 - admin_token: The admin token for the Porch server (used to create new pipelines).
 - name: The pipeline name (the first part of its identity).
 - uri: The pipeline URI (the second part of its identity).
 - version: The pipeline version (the third part of its identity).
-- task: The fully qualified Python class anme of the pipeline task.
+- task: The fully qualified Python class name of the pipeline task.
 
 A configuration instance can be created directly and populated with tokens obtained from a secrets
 manager. E.g.
 
     config = Config(
-        porch_url="https://example.com/porch",
+        server_url="https://example.com/porch",
         admin_token=token1,
         pipeline_token=token2,
         name="Example pipeline",
-        uri="htps://example.com/example_pipeline/1",
+        uri="https://example.com/example_pipeline/1",
+        version="1.0.0",
         task="example.Task",
     )
 
@@ -45,20 +46,21 @@ instances can be created from a named section of a configuration INI file using 
 An example INI file would look like this:
 
     [<section name>]
-    url = http://localhost:8000
+    server_url = http://localhost:8000
     pipeline_token = 11111111111111111111111111111111
     admin_token = 0000000000000000000000000000000
 
     [<section name>]
     name = Example pipeline
-    uri = htps://example.com/example_pipeline/1
+    uri = https://example.com/example_pipeline/1
+    version = 1.0.0
     task = example.Task
 
 The corresponding code to populate the `Config` dataclass would look like this:
 
     config = IniData(Pipeline.Config).from_file(<file name>, <section name>*)
 
-The token fields are set to not be included in the repr () output to avoid leaking sensitive
+The token fields are set to not be included in the repr() output to avoid leaking sensitive
 information in logs.
 
 ### Creating Pipelines and Tasks on a Porch server
@@ -131,7 +133,7 @@ When this is done, you can create a new Pipeline and add tasks to it:
     for task in tasks:
         p.add(task)
 
-The task class is resolved from the `task`, attribute which must name a class in an importable
+The task class is resolved from the `task` attribute which must name a class in an importable
 module.
 
 If you are using Porch 3.0.0 or later, then registering a new pipeline requires both an admin
@@ -144,14 +146,15 @@ to capture this token into the active in-memory config instance.
 However, if you want to persist the token beyond the session, it is then up to you to store the
 config appropriately.
 
-Once tasks are added, you can claim and update their status as they are processed:
+Once tasks are added, you can claim and update their status as they are processed.
 
-    claimed_task = p.claim()
-    try:
-        # Submit the task to a worker
-        p.run(task)  # Tell the Porch server that the task is running
-    except Exception as e:
-        p.fail(task)  # Tell the Porch server that the task failed
+    claimed_task = p.claim(1)
+    for task in claimed_task:
+        try:
+            # Submit the task to a worker
+            p.run(task)  # Tell the Porch server that the task is running
+        except Exception as e:
+            p.fail(task)  # Tell the Porch server that the task failed
 
 Porch will ensure that each task is created exactly once and that each task is claimed for processing
 once, by only one worker.
@@ -170,15 +173,15 @@ In order to support different modes of pipeline deployment, this library adds th
 compatibility policy whereby a pipeline reports only some part of its version, or a transformed version,
 to the server. For example, in order to support deployment of patch versions of the pipeline (that do not
 cause changes in pipeline output), the pipeline can declare a MAJOR_MINOR policy. Only those parts of
-the version will be passed to the server, while patch versions can still be trackedin the pipeline code.
+the version will be passed to the server, while patch versions can still be tracked in the pipeline code.
 
-The Pipeline class uses the  [Porch](https://github.com/wtsi-npg/npg_porch) REST API. See its documentation
+The Pipeline class uses the [Porch](https://github.com/wtsi-npg/npg_porch) REST API. See its documentation
 for more information. It has a timeout of 10 seconds and will retry failed requests up to 3 times
 with an exponential backoff starting at 15 seconds.
 
 ### Included Tasks
 
-### Reusable shell-command tasks
+#### Reusable shell-command tasks
 
 `ShellCommandTask` runs trusted Bash commands that are defined as a command template
 plus named string-valued parameters:
@@ -197,7 +200,7 @@ task = ShellCommandTask(
 
 Parameters are interpolated into placeholders of the form `{:name:}` where the literal
 `name` corresponds to its name. No whitespace is permitted between the `{:` and `:}`
-delimiter. Parameter names must match the regular expression `[A-Za-z_][A-Za-z0-9_]*`
+delimiters. Parameter names must match the regular expression `[A-Za-z_][A-Za-z0-9_]*`
 and values must be strings. Each value is quoted and then inserted into the template,
 replacing the placeholder.
 

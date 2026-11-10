@@ -41,7 +41,7 @@ SHELL_VALUE_PATTERN = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 """Regex for the permitted values that can be inserted into shell commands via placeholders."""
 
 PLACEHOLDER_PATTERN = re.compile(r"\{\{?:|:}}?")
-""""Regex for shell command placeholders."""
+"""Regex for shell command placeholders."""
 
 TOKEN_PATTERN = r"\{\{:(?P<escaped>[a-zA-Z_][a-zA-Z0-9_]*):\}\}|\{:(?P<name>[a-zA-Z_][a-zA-Z0-9_]*):\}"
 """Regex for populated shell command placeholders, including the surrounding double-braces."""
@@ -106,7 +106,7 @@ class TailBuffer(FileIO):
             read_fd, write_fd = os.pipe()
             # FileIO becomes responsible for closing the writer
             super().__init__(write_fd, "wb", closefd=True)
-        except Exception:
+        except BaseException:
             if read_fd is not None:
                 os.close(read_fd)
             if write_fd is not None:
@@ -116,7 +116,7 @@ class TailBuffer(FileIO):
         try:
             reader = Thread(target=self._consume, args=(read_fd,), daemon=True)
             reader.start()
-        except Exception:
+        except BaseException:
             if read_fd is not None:
                 os.close(read_fd)
             super().close()
@@ -158,6 +158,9 @@ class TailBuffer(FileIO):
 
         if self._reader.is_alive():
             raise TimeoutError("Tail buffer reader did not reach EOF")
+
+        self._reader = None  # Now successive calls to close will exit early
+
         if self._error is not None:
             raise OSError("Failed to read subprocess output") from self._error
 
@@ -460,6 +463,10 @@ class ShellCommandTask(Task):
                 logger().debug("Shell task environment", pid=pid)
 
                 exit_code = process.wait(timeout=timeout)
+
+                stdout_buff.close()
+                stderr_buff.close()
+
                 num_out_bytes = stdout_buff.bytes_read()
                 num_err_bytes = stderr_buff.bytes_read()
 
@@ -487,10 +494,10 @@ class ShellCommandTask(Task):
                     command, exit_code, stdout_buff.getvalue(), stderr_buff.getvalue()
                 )
 
-            except Exception:
+            except BaseException:
                 self._terminate(command, process)
                 logger().error(
-                    "Shall task failed",
+                    "Shell task failed",
                     command=command,
                     pid=pid,
                     exit_code=exit_code,
