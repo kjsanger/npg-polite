@@ -1,8 +1,8 @@
 [pytest]
-pythonpath = ["src", "tests" ]
-testpaths = [ "tests" ]
-python_functions = [ "test_*" ]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
+python_functions = ["test_*"]
 log_cli = false
-log_cli_level = "INFO"
+log_cli_level = "ERROR"
 
 addopts = ["--import-mode=prepend"]

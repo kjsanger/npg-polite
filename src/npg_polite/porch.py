@@ -16,14 +16,19 @@
 #
 
 import http
+import inspect
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
+from importlib import import_module
+from pathlib import Path
 from typing import Any, Self, cast
 from urllib.parse import urljoin
 
 import requests
+from npg.conf import ConfigParser, IniData
 from requests import Response
 from structlog import get_logger
 
@@ -38,11 +43,23 @@ For a request/response-centric API, see https://github.com/wtsi-npg/npg_porch_cl
 """
 
 
+CONFIG_SERVER_SECTION = "PORCH"
+CONFIG_PIPELINE_SECTION = "PIPELINE"
+
+
 class PoliteError(Exception):
     pass
 
 
 class PolitePrivilegeError(PoliteError):
+    pass
+
+
+class PoliteVersionError(PoliteError):
+    pass
+
+
+class TaskNotFoundError(PoliteError):
     pass
 
 
@@ -82,7 +99,7 @@ class Task(ABC):
 
     """
 
-    class Status(str, Enum):
+    class Status(StrEnum):
         """The status of a task."""
 
         PENDING = "PENDING"
@@ -122,6 +139,80 @@ class Task(ABC):
         raise NotImplementedError
 
 
+def parse_semver(version: str) -> tuple[str, str, str]:
+    """Parses a semantic version string into its major, minor, and patch components.
+
+    This function takes a semantic version string formatted as "major.minor.patch"
+    and splits it into its individual components: major, minor, and patch.
+
+    Args:
+        version: A semantic version string expected to be in the format
+            "major.minor.patch".
+
+    Returns:
+        A tuple containing the major, minor, and patch components as strings.
+    """
+    parts = version.split(".")
+    if not len(parts) == 3:
+        raise PoliteVersionError(f"Invalid semantic version '{version}'")
+    major, minor, patch = parts
+
+    return major, minor, patch
+
+
+class CompatibilityPolicy(StrEnum):
+    """A policy influencing how a pipeline exposes its local versioning to the Porch
+    server.
+
+    Attributes:
+        EXACT: The pipeline reports its version exactly as-is e.g. "1.0.1". This means
+            that even patch level version changes will behave as new pipeline versions
+            and tasks with the same payload will not be identical across patch-level
+            changes. Any change to the pipeline version will permit re-work.
+        MAJOR_MINOR: The pipeline reports only major and minor semver version
+            components. Tasks with the same payload and different pipeline patch
+            versions will be identical, so patches will not permit re-work. The
+            pipeline version must be semver format.
+        MAJOR: As MAJOR_MINOR, but only the major semver component is reported.
+        CUSTOM: A custom version identifier, independent of the pipeline version will
+            be reported. This may be appropriate where important pipeline behavioural
+            changes are not linked to the pipeline version.
+    """
+
+    EXACT = "EXACT"
+    MAJOR_MINOR = "MAJOR_MINOR"
+    MAJOR = "MAJOR"
+    CUSTOM = "CUSTOM"
+
+    def compatible_version(self, version: str, custom: str | None = None) -> str:
+        """Return a compatible pipeline version according to policy.
+
+        Args:
+            version: The local version.
+            custom: A custom version to use where policy requires. Optional.
+
+        Returns:
+            A version that indicates compatibility.
+        """
+        match self:
+            case CompatibilityPolicy.EXACT:
+                return version
+            case CompatibilityPolicy.MAJOR_MINOR:
+                major, minor, _ = parse_semver(version)
+                return f"{major}.{minor}"
+            case CompatibilityPolicy.MAJOR:
+                major, _, _ = parse_semver(version)
+                return major
+            case CompatibilityPolicy.CUSTOM:
+                if custom is None:
+                    raise PoliteVersionError(
+                        f"No custom version was supplied for '{version}'"
+                    )
+                return custom
+            case _:
+                raise PoliteError(f"Unexpected compatibility policy '{self}'")
+
+
 class Pipeline[T: Task = Task]:
     """A Porch "pipeline".
 
@@ -142,13 +233,13 @@ class Pipeline[T: Task = Task]:
     to ensure that each task is created and processed once.
 
     To use this module for a new pipeline, you need to create a subclass of
-    `Pipeline.Task` and implement the `to_serializable` and `from_serializable`
+    `Task` and implement the `to_serializable` and `from_serializable`
     methods. See the Porch documentation for more information on how the task
     attributes and values are serialized as JSON.
 
     For example:
 
-        from porch import Pipeline
+        from npg_polite.porch import Pipeline, Task
 
         class SumTask(Task):
             input1: int
@@ -165,13 +256,20 @@ class Pipeline[T: Task = Task]:
                     "input2": self.input2,
                 }
 
+            @classmethod
             def from_serializable(cls, serializable: dict):
                 return cls(**serializable)
 
     When this is done, you can create a new pipeline and add tasks to it:
 
-        p = Pipeline("Sum of two integers", "http://localhost/sum", "1.0.0")
-        p = p.register()  # Needs to be done once
+        config = Pipeline.Config(
+            name="Sum of two integers",
+            uri="http://example.com/sum",
+            version="1.0.0",
+            task=f"{SumTask.__module__}.{SumTask.__qualname__}",
+        )
+        p = Pipeline[SumTask](config=config, server_config=server_config)
+        p = p.register(update_config=True)  # Needs to be done once
 
         tasks = [
             SumTask(10, 42),
@@ -191,93 +289,140 @@ class Pipeline[T: Task = Task]:
             p.fail(task)  # Tell the Porch server that the task failed
 
     Porch will ensure that each task is created exactly once and that each task is
-    claimed for processing once, by only one worker.
+    claimed for processing at least once.
 
     This class uses the Porch REST API. See the Porch documentation for more
     information. It has a timeout of 10 seconds and will retry failed requests up to 3
     times with an exponential backoff starting at 15 seconds.
-
-    Note: We could consider using only the first or first and second parts of the
-    (SemVer) version number. This would allow bug-fix releases to be made that could
-    re-run existing tasks for that version.
     """
 
-    @dataclass
-    class ServerConfig:
-        """Configuration for a Porch pipeline server.
+    @dataclass(slots=True)
+    class Config:
+        """Configuration for a Porch pipeline.
 
         This exists to collect external configuration for a pipeline in one place
         where it can be passed to the pipeline constructor.
 
         A configuration instance can be created directly and populated with tokens
-        obtained from a secrets manager. E.g.
-
-            config = ServerConfig(
-                porch_url="https://example.com/porch",
-                admin_token=token1,
-                pipeline_token=token2,
-            )
-
-        Alternatively, configuration (and possibly tokens) can be read from a file.
+        obtained from a secrets manager. Alternatively, configuration (and possibly
+        tokens) can be read from a file.
 
         The token fields are set to not be included in the repr() output to avoid
         leaking sensitive information in logs.
-        """
 
-        url: str
-        """The base URL of the Porch server."""
-
-        pipeline_token: str | None = field(repr=False, default=None)
-        admin_token: str | None = field(repr=False, default=None)
-
-    name: str
-    uri: str
-    version: str
-    config: ServerConfig
-
-    timeout: float | int
-
-    def __init__(
-        self, cls: type[T], name: str, uri: str, version: str, config: ServerConfig
-    ):
-        """Create a new pipeline with no pipeline access token set.
-
-        Args:
-            cls: The task class for this pipeline. Must be a subclass of Task.
+        Attributes:
             name: The pipeline name.
             uri: The pipeline URI.
             version: The pipeline version.
-            config: The configuration for the pipeline server.
+            task: The fully qualified class name of the pipeline's tasks.
+            server_url: The base URL of the Porch server.
+            admin_token: The pipeline admin token, if any.
+            pipeline_token: The pipeline auth token.
+            compatibility_policy: The compatibility policy between different versions of the
+                pipeline. Defaults to being EXACT i.e. any change to the pipeline's
+                version will be exposed to the server.
+            compatibility_version: An custom compatibility version to be used with the
+               CUSTOM compatibility policy. Defaults to None.
         """
 
-        # Note that the task class is passed explicitly to the constructor because
-        # it's not reliable (Python 3.12) to get the class parameter for a generic
-        # type at runtime (using documented API) when using e.g.
-        #
-        #     p = Pipeline[ExampleTask](...)
-        #
-        # If Pipeline is subclassed e.g.
-        #
-        #     class FooPipeline(Pipeline[ExampleTask]):
-        #         pass
-        #
-        #  p = FooPipeline(...)
-        #
-        # One can use:
-        #
-        #     cls = get_args(self.__orig_bases__[0])[0]
-        #
-        # However, I've not been able to get this to work without requiring a
-        # subclass and that puts a burden on the user of the API to jump through
-        # language hoops to get something that works.
+        name: str
+        uri: str
+        version: str
+        task: str
 
-        self.cls = cls
-        self.name = name
-        self.uri = uri
-        self.version = version
+        server_url: str
+        admin_token: str | None = field(repr=False, default=None)
+        pipeline_token: str | None = field(repr=False, default=None)
+        compatibility_policy: str | None = None
+        compatibility_version: str | None = None
+
+        def __post_init__(self):
+            if self.compatibility_policy is None:
+                self.compatibility_policy = CompatibilityPolicy.EXACT
+            else:
+                self.compatibility_policy = CompatibilityPolicy(
+                    self.compatibility_policy
+                )
+
+            self.resolve_task_class()
+
+        def resolve_task_class(self) -> type[Task]:
+            """Resolve the configured task class by its fully qualified name.
+
+            Returns:
+                The resolved task class.
+
+            Raises:
+                TaskNotFoundError: If the name is not in module.class format or
+                    does not identify a Task subclass in the module.
+                ModuleNotFoundError: If the task module cannot be imported.
+            """
+            name = self.task
+            parts = name.rsplit(".", 1)
+            if len(parts) == 1:
+                raise TaskNotFoundError(
+                    f"Invalid task name '{name}'; expected a `<module name>.<class name>` string"
+                )
+
+            module_name, class_name = parts
+            logger().debug(f"Resolving task '{name}' in module '{module_name}'")
+
+            module = import_module(module_name)
+            for member_name, obj in inspect.getmembers(module, inspect.isclass):
+                if member_name == class_name and issubclass(obj, Task):
+                    return obj
+
+            raise TaskNotFoundError(f"Task '{name}' not found")
+
+    config: Config
+
+    timeout: float | int
+
+    def __init__(self, config: Config):
+        """Create a pipeline using the task class named in its configuration.
+
+        The generic task type must match config.task. This relationship cannot be
+        checked statically or enforced by the cast below. Use Pipeline[SomeTask]
+        for subclass-specific typing; an unspecialised Pipeline defaults to Task.
+
+        Args:
+            config: The configuration for the pipeline.
+        """
         self.config = config
-
+        # Callers are responsible for matching T to the configured task class.
+        self.cls: type[T] = cast(type[T], config.resolve_task_class())
         self.timeout = 10
+
+    @property
+    def name(self) -> str:
+        """Return the pipeline name defined its config."""
+        return self.config.name
+
+    @property
+    def uri(self) -> str:
+        """Return the pipeline URI defined its config."""
+        return self.config.uri
+
+    @property
+    def version(self) -> str:
+        """Return the pipeline version defined its config."""
+        return self.config.version
+
+    @property
+    def compatibility_policy(self) -> CompatibilityPolicy:
+        """Return the pipeline compatibility policy defined its config."""
+        return CompatibilityPolicy(self.config.compatibility_policy)
+
+    @property
+    def compatibility_version(self) -> str | None:
+        """Return the pipeline compatibility version defined its config."""
+        return self.config.compatibility_version
+
+    def compatible_version(self) -> str:
+        """Return a compatible pipeline version according to its compatibility policy."""
+        return self.compatibility_policy.compatible_version(
+            self.version, self.compatibility_version
+        )
 
     def register(self, update_config: bool = False) -> Self:
         """Register the pipeline with a Porch server.
@@ -516,7 +661,7 @@ class Pipeline[T: Task = Task]:
         pipeline = {
             "name": self.name,
             "uri": self.uri,
-            "version": self.version,
+            "version": self.compatible_version(),
         }
 
         if task is None:
@@ -583,16 +728,20 @@ class Pipeline[T: Task = Task]:
         raise PoliteError("Request processing failed")
 
     def _pipeline_endpoint(self) -> str:
-        return urljoin(self.config.url, "pipelines/")
+        return urljoin(self.config.server_url, "pipelines/")
 
     def _task_endpoint(self) -> str:
-        return urljoin(self.config.url, "tasks/")
+        return urljoin(self.config.server_url, "tasks/")
 
     def _version_endpoint(self) -> str:
-        return urljoin(self.config.url, "versions/")
+        return urljoin(self.config.server_url, "versions/")
 
     def __repr__(self):
-        return f"Pipeline({self.name}, {self.uri}, {self.version})"
+        return (
+            f"Pipeline({self.name} URI: {self.uri} "
+            f"compatible version: {self.compatible_version()} "
+            f"version: {self.version})"
+        )
 
     @staticmethod
     def _headers(token: str) -> dict[str, str]:
@@ -601,3 +750,59 @@ class Pipeline[T: Task = Task]:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+
+def load_pipeline_config(path: Path) -> Pipeline.Config:
+    """Load a pipeline configuration from a file."""
+    return IniData(Pipeline.Config, use_env=True, env_prefix="PORCH_").from_file(
+        Path(path).resolve(), CONFIG_SERVER_SECTION, CONFIG_PIPELINE_SECTION
+    )
+
+
+def write_pipeline_config(config: Pipeline.Config, path: Path):
+    """Write a pipeline configuration to an INI-style file.
+
+    The target file is created or overwritten with restrictive file permissions so
+    that only the owner can read and write it.
+
+    Args:
+        config: A pipeline configuration.
+        path: The path for the configuration file.
+
+    Raises:
+        AttributeError: If the configuration object does not expose an expected
+            field.
+        OSError: If the destination file cannot be created, opened, truncated, or
+            written.
+    """
+    conf = ConfigParser()
+    conf.add_section(CONFIG_PIPELINE_SECTION)
+    for k in [
+        "name",
+        "uri",
+        "version",
+        "task",
+        "compatibility_policy",
+        "compatibility_version",
+    ]:
+        v = getattr(config, k)
+        if v is not None:
+            # Use str() because compatibility_policy is not a string
+            conf.set(CONFIG_PIPELINE_SECTION, k, str(v))
+
+    conf.add_section(CONFIG_SERVER_SECTION)
+    for k in ["server_url", "admin_token", "pipeline_token"]:
+        v = getattr(config, k)
+        if v is not None:
+            conf.set(CONFIG_SERVER_SECTION, k, v)
+
+    # Ensure 0600 because of access tokens
+    def opener(_path: str, _: int) -> int:
+        return os.open(
+            path=_path,
+            flags=(os.O_WRONLY | os.O_CREAT | os.O_TRUNC),
+            mode=0o600,
+        )
+
+    with open(Path(path).resolve(), "w", opener=opener) as f:
+        conf.write(f)
