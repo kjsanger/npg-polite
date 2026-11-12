@@ -43,7 +43,7 @@ def register_pipeline_cli(argv: list[str] | None = None) -> int:
     parser = add_version_argument(parser)
     parser = add_config_argument(parser)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     configure_structlog(
         config_file=args.log_config,
         debug=args.debug,
